@@ -1,0 +1,152 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="sanctum" data-ornament="medium" data-accent="gold" data-tweaks="off">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+<title>DestinyQuest — Companion</title>
+
+<!-- React + Babel (pinned) -->
+<script src="https://unpkg.com/react@18.3.1/umd/react.development.js" integrity="sha384-hD6/rw4ppMLGNu3tX5cjIb+uRZ7UkRJ6BPkLpg4hAu/6onKUg4lLsHAs9EBPT82L" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/react-dom@18.3.1/umd/react-dom.development.js" integrity="sha384-u6aeetuaXnQ38mYT8rp6sbXaQe3NL9t+IBXmnYxwkUI2Hw4bsp2Wvmx4yRQF1uAm" crossorigin="anonymous"></script>
+<script src="https://unpkg.com/@babel/standalone@7.29.0/babel.min.js" integrity="sha384-m08KidiNqLdpJqLq95G/LEi8Qvjl/xUYll3QILypMoQ65QorJ9Lvtp2RXYGBFj1y" crossorigin="anonymous"></script>
+
+<link rel="stylesheet" href="themes.css">
+
+<style>
+  html, body { margin: 0; padding: 0; }
+  #root { min-height: 100vh; }
+  /* Loading splash */
+  .__splash {
+    position: fixed; inset: 0; display: flex; align-items: center; justify-content: center;
+    background: #070402;
+    color: #d9a41a; font-family: 'Cinzel Decorative', Georgia, serif;
+    letter-spacing: 4px; font-size: 13px;
+    z-index: 50;
+  }
+</style>
+</head>
+<body>
+  <div class="__splash" id="__splash">— KINDLING THE TOME —</div>
+  <div id="root"></div>
+
+  <!-- Tweaks FAB -->
+  <div class="tweaks-fab" id="tweaks-fab">
+    <div class="tweaks-panel">
+      <div class="tweaks-title">⚜ Tweaks ⚜</div>
+
+      <div class="tweaks-row">
+        <div class="tweaks-label">Theme</div>
+        <div class="tweaks-seg" data-tweak="theme" style="grid-template-columns: 1fr 1fr 1fr;">
+          <button class="tweaks-btn" data-value="sanctum">Sanctum</button>
+          <button class="tweaks-btn" data-value="reliquary">Reliquary</button>
+          <button class="tweaks-btn" data-value="grimoire">Grimoire</button>
+        </div>
+      </div>
+
+      <div class="tweaks-row">
+        <div class="tweaks-label">Ornament</div>
+        <div class="tweaks-seg" data-tweak="ornament">
+          <button class="tweaks-btn" data-value="off">Plain</button>
+          <button class="tweaks-btn" data-value="medium">Medium</button>
+          <button class="tweaks-btn" data-value="heavy">Heavy</button>
+        </div>
+      </div>
+
+      <div class="tweaks-row">
+        <div class="tweaks-label">Accent</div>
+        <div class="tweaks-seg" style="grid-template-columns: repeat(6, 1fr);" data-tweak="accent">
+          <button class="tweaks-btn" data-value="gold"    title="Gold"><span class="tweaks-swatch" style="background:#f6cd4a"></span></button>
+          <button class="tweaks-btn" data-value="bone"    title="Bone"><span class="tweaks-swatch" style="background:#e8d9b0"></span></button>
+          <button class="tweaks-btn" data-value="verdant" title="Verdant"><span class="tweaks-swatch" style="background:#9cc040"></span></button>
+          <button class="tweaks-btn" data-value="azure"   title="Azure"><span class="tweaks-swatch" style="background:#6fa0d0"></span></button>
+          <button class="tweaks-btn" data-value="violet"  title="Violet"><span class="tweaks-swatch" style="background:#a06fc8"></span></button>
+          <button class="tweaks-btn" data-value="ember"   title="Ember"><span class="tweaks-swatch" style="background:#ff9848"></span></button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+<script>
+// ─── TWEAKS DEFAULTS (persisted by host) ────────────────────────────────────
+const TWEAK_DEFAULTS = /*EDITMODE-BEGIN*/{
+  "theme": "sanctum",
+  "ornament": "heavy",
+  "accent": "azure"
+}/*EDITMODE-END*/;
+
+// Apply on load (localStorage overrides saved defaults)
+(function applyTweaks() {
+  const html = document.documentElement;
+  const saved = (() => { try { return JSON.parse(localStorage.getItem('dq_tweaks') || '{}'); } catch { return {}; } })();
+  const merged = Object.assign({}, TWEAK_DEFAULTS, saved);
+  Object.entries(merged).forEach(([k, v]) => html.setAttribute('data-' + k, v));
+})();
+
+function setTweak(key, value) {
+  const html = document.documentElement;
+  html.setAttribute('data-' + key, value);
+  // Persist locally
+  let saved = {};
+  try { saved = JSON.parse(localStorage.getItem('dq_tweaks') || '{}'); } catch {}
+  saved[key] = value;
+  localStorage.setItem('dq_tweaks', JSON.stringify(saved));
+  // Notify host for file-level persistence
+  const edit = {}; edit[key] = value;
+  try { window.parent.postMessage({type: '__edit_mode_set_keys', edits: edit}, '*'); } catch {}
+  // Sync button active states
+  refreshTweakButtons();
+}
+
+function refreshTweakButtons() {
+  const html = document.documentElement;
+  document.querySelectorAll('.tweaks-seg').forEach(seg => {
+    const key = seg.getAttribute('data-tweak');
+    const cur = html.getAttribute('data-' + key);
+    seg.querySelectorAll('.tweaks-btn').forEach(btn => {
+      btn.classList.toggle('active', btn.getAttribute('data-value') === cur);
+    });
+  });
+}
+
+document.addEventListener('DOMContentLoaded', () => {
+  refreshTweakButtons();
+  document.querySelectorAll('.tweaks-seg').forEach(seg => {
+    const key = seg.getAttribute('data-tweak');
+    seg.addEventListener('click', (e) => {
+      const btn = e.target.closest('.tweaks-btn');
+      if (!btn) return;
+      setTweak(key, btn.getAttribute('data-value'));
+    });
+  });
+});
+
+// ─── Host Tweaks protocol ────────────────────────────────────────────────────
+// 1) Register message listener FIRST
+window.addEventListener('message', (e) => {
+  const d = e.data || {};
+  if (d.type === '__activate_edit_mode')   document.documentElement.setAttribute('data-tweaks', 'on');
+  if (d.type === '__deactivate_edit_mode') document.documentElement.setAttribute('data-tweaks', 'off');
+});
+// 2) Then announce availability
+try { window.parent.postMessage({type: '__edit_mode_available'}, '*'); } catch {}
+</script>
+
+<!-- Main app -->
+<script type="text/babel" data-presets="env,react" src="app.jsx"></script>
+
+<script>
+  // Remove splash once React renders
+  const obs = new MutationObserver(() => {
+    const root = document.getElementById('root');
+    if (root && root.children.length > 0) {
+      const splash = document.getElementById('__splash');
+      if (splash) splash.remove();
+      obs.disconnect();
+    }
+  });
+  obs.observe(document.getElementById('root'), { childList: true });
+  // Hard fallback in case of error
+  setTimeout(() => { const s = document.getElementById('__splash'); if (s) s.style.display = 'none'; }, 8000);
+</script>
+</body>
+</html>
