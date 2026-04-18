@@ -2161,28 +2161,55 @@ const ABILITY_TYPE_LABEL = { sp: "Speed", co: "Combat", mo: "Modifier", pa: "Pas
 // implies 1 activation). matchesOnce() uses key.includes() so partial name matches
 // work for abilities that appear with suffixes in custom entries.
 const ONCE_PER_COMBAT = new Set([
-  'gut ripper',    // change all dice to 6 — once per combat
-  'fallen hero',   // heal 10 + brawn — once per combat
-  'cauterise',     // clears poisons — once, then susceptible again
-  'second wind',   // restore a speed ability — once per combat
-  'eureka',        // +1 any stat — once per combat
-  'stun',          // reduce foe dice — once per combat
-  'shackle',       // reduce foe dice — once per combat
+  // ── Explicitly stated once per combat in glossary ──────────────────────────
+  'gut ripper',    // change all dice to 6
+  'fallen hero',   // heal 10 + brawn
+  'cauterise',     // clears poisons
+  'tourniquet',    // clears poisons (same rule as cauterise — glossary: once per combat)
+  'second wind',   // restore a speed ability
+  'eureka',        // +1 any stat
+  'stun',          // reduce foe dice
+  'shackle',       // reduce foe dice
   'adrenaline',    // +2 speed for 2 rounds — one activation per combat
-  'charge',        // +2 speed round 1 only — effectively once per combat
-  'time shift',    // match foe speed for 3 rounds — once per combat
-  'blood rage',    // +2 brawn for remainder — once per combat (auto-triggers)
-  'vampirism',     // toggle on for combat — once per combat
-  'meditation',    // heal 1/round for combat — once per combat
-  'haunt',         // spirit haunts foe — once per combat (spirit persists)
-  'bolt',          // charge+release cycle — once per combat
+  'charge',        // +2 speed round 1 only
+  'time shift',    // match foe speed for 3 rounds
+  'blood rage',    // +2 brawn for remainder (auto-triggers)
+  'vampirism',     // toggle on for combat
+  'meditation',    // heal 1/round for combat
+  'haunt',         // spirit haunts foe (spirit persists)
+  'bolt',          // charge+release cycle
   'raining blows', // passive: each 6 triggers extra die — toggle once
-  'dark pact',     // LoS: no stated limit (HP cost throttles); HoF/EoWF/RoDS: explicit once per combat
-  'consume',       // mo type so misses usedThisRound; reduces foe dice permanently — once per combat
-  'shadow speed',  // mo toggle — once active for the combat, clicking again does nothing meaningful
-  'siphon',        // HoF: (mo) once per combat — Da Boss confirmed forum 4037
-  'acid',          // LoS (mo): activated once, +1 per damage die for combat duration
-  'sear',          // LoS (mo): activated once, +1 per damage die for combat duration
+  'dark pact',     // HoF/EoWF/RoDS: explicit; LoS: HP cost throttles use naturally
+  'consume',       // reduces foe dice permanently
+  'shadow speed',  // mo toggle — once active for the combat
+  'siphon',        // HoF: once per combat — Da Boss confirmed forum 4037
+  'acid',          // LoS (mo): +1 per damage die for combat duration
+  'sear',          // LoS (mo): +1 per damage die for combat duration
+  // ── Glossary default: "each ability can only be used once during a combat" ─
+  // All (mo) abilities below have no stated exception, so they fall under the
+  // default rule. Previously they were untracked — this was a bug.
+  'mend',          // +15 HP
+  'dominate',      // set one damage die to 6
+  'fortitude',     // +3 brawn or armour
+  'focus',         // +3 magic
+  'vanquish',      // +2 brawn
+  'savagery',      // +2 brawn
+  'bright shield', // +4 armour
+  'iron will',     // +3 armour
+  'might of stone',// +3 armour
+  'ice shield',    // +1d6 armour
+  'second sight',  // foe dice -2
+  'martyr',        // take 5 HP instead of foe's roll
+  'brain drain',   // spend magic for damage
+  'shadow fury',   // add weapon speeds to damage
+  'corruption',    // foe -2 brawn permanent
+  'rust',          // foe -2 armour permanent
+  'disrupt',       // foe -3 magic permanent
+  'cripple',       // foe -1 speed for 3 rounds
+  'rebound',       // +2 speed next round
+  'steal',         // copy a foe attribute
+  'feint',         // re-roll selected dice (mo type — was wrongly round-scoped)
+  'surefooted',    // re-roll all dice (mo type — was wrongly round-scoped)
 ]);
 const matchesOnce = (k) => [...ONCE_PER_COMBAT].some(n => k.includes(n));
 
@@ -4669,24 +4696,20 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
   // Enforcement rules per glossary (v1.4):
   //
   // ONCE-PER-COMBAT (usedOnce set):
-  //   gut ripper, execution (1 per ROUND not combat — handled via usedThisRound),
-  //   fallen hero, cauterise, second wind, eureka, stun, shackle,
-  //   adrenaline (2-round duration but only 1 activation), charge (round-1 only),
-  //   time shift (3-round duration), blood rage (auto + manual guard),
-  //   vampirism, meditation, haunt, bolt (charge+release treated as 1 use),
-  //   raining blows (passive toggle, stays on — guard prevents double-toggle)
-  //
-  // UNLIMITED MODIFIERS (no usedOnce, no usedThisRound):
-  //   last laugh (LoS: no limit; later books: once per combat — see ABILITY_DB desc note),
-  //   tourniquet (reusable if re-infected), brain drain (spends magic — natural throttle),
-  //   second sight (per-round, clears automatically), steal, windwalker (co — per-round)
+  //   Default rule (glossary): every ability unless stated otherwise.
+  //   Speed (sp): all go into usedOnce automatically by type.
+  //   Modifier (mo): tracked via ONCE_PER_COMBAT set at module scope.
+  //     Exceptions with special rules:
+  //       execution — sp type but once per ROUND, tracked via usedThisRound
+  //       watchful, deceive/trickster — interactive, once per round via usedThisRound
+  //       last laugh (LoS only) — explicitly no limit in LoS; later books once per combat
   //
   // MULTI-USE (one use per equipped item copy):
-  //   heal, regrowth, mend
+  //   heal, charm, regrowth — FAQ Q5 (Da Boss)
   //
-  // ONCE-PER-ROUND (usedThisRound — type sp or co):
-  //   All speed (sp) and combat (co) abilities UNLESS overridden above.
-  //   Execution is sp but fires once per ROUND (not per combat), so usedThisRound only.
+  // ONCE-PER-ROUND (usedThisRound — type co):
+  //   All combat (co) abilities reset each round.
+  //   Watchful / deceive / trickster are interactive mo abilities treated as per-round.
 
   const activateAbility = (name, type, slotIndex = null) => {
     const key = name.toLowerCase();
@@ -5122,7 +5145,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         addLog(`${name}: 🎯 Select which of your dice to re-roll, then press Confirm Feint.`, 'log-roll');
       } else {
         addLog(`${name}: no dice rolled yet.`, 'log-passive');
-        setUsedThisRound(prev => { const s=new Set(prev); s.delete(key); return s; });
+        setUsedOnce(prev => { const s=new Set(prev); s.delete(key); return s; });
       }
     } else if (key.includes('surefooted')) {
       // Reroll all hero dice immediately
@@ -5136,7 +5159,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         _recalcWinner(finalDice, foes);
       } else {
         addLog(`${name}: no dice rolled yet.`, 'log-passive');
-        setUsedThisRound(prev => { const s=new Set(prev); s.delete(key); return s; });
+        setUsedOnce(prev => { const s=new Set(prev); s.delete(key); return s; });
       }
     } else if (key.includes('last laugh')) {
       // Reroll all foe dice immediately
@@ -5983,7 +6006,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
                   cursor:'pointer',borderRadius:1,background:'rgba(0,0,0,0.3)',
                   border:'1px solid rgba(90,74,32,0.4)',color:'var(--parchment-dark)'}}
                   onClick={()=>{setPendingDiceAction(null);setFeintSelection([]);
-                    setUsedThisRound(prev=>{const s=new Set(prev);s.delete('feint');return s;});}}>
+                    setUsedOnce(prev=>{const s=new Set(prev);s.delete('feint');return s;});}}>
                   Cancel
                 </button>
               </div>
