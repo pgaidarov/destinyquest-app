@@ -2162,54 +2162,46 @@ const ABILITY_TYPE_LABEL = { sp: "Speed", co: "Combat", mo: "Modifier", pa: "Pas
 // work for abilities that appear with suffixes in custom entries.
 const ONCE_PER_COMBAT = new Set([
   // ── Explicitly stated once per combat in glossary ──────────────────────────
-  'gut ripper',    // change all dice to 6
-  'fallen hero',   // heal 10 + brawn
-  'cauterise',     // clears poisons
-  'tourniquet',    // clears poisons (same rule as cauterise — glossary: once per combat)
-  'second wind',   // restore a speed ability
-  'eureka',        // +1 any stat
-  'stun',          // reduce foe dice
-  'shackle',       // reduce foe dice
-  'adrenaline',    // +2 speed for 2 rounds — one activation per combat
-  'charge',        // +2 speed round 1 only
-  'time shift',    // match foe speed for 3 rounds
-  'blood rage',    // +2 brawn for remainder (auto-triggers)
-  'vampirism',     // toggle on for combat
-  'meditation',    // heal 1/round for combat
-  'haunt',         // spirit haunts foe (spirit persists)
-  'bolt',          // charge+release cycle
-  'raining blows', // passive: each 6 triggers extra die — toggle once
-  'dark pact',     // HoF/EoWF/RoDS: explicit; LoS: HP cost throttles use naturally
-  'consume',       // reduces foe dice permanently
-  'shadow speed',  // mo toggle — once active for the combat
-  'siphon',        // HoF: once per combat — Da Boss confirmed forum 4037
-  'acid',          // LoS (mo): +1 per damage die for combat duration
-  'sear',          // LoS (mo): +1 per damage die for combat duration
-  // ── Glossary default: "each ability can only be used once during a combat" ─
-  // All (mo) abilities below have no stated exception, so they fall under the
-  // default rule. Previously they were untracked — this was a bug.
-  'mend',          // +15 HP
-  'dominate',      // set one damage die to 6
-  'fortitude',     // +3 brawn or armour
-  'focus',         // +3 magic
-  'vanquish',      // +2 brawn
-  'savagery',      // +2 brawn
-  'bright shield', // +4 armour
-  'iron will',     // +3 armour
-  'might of stone',// +3 armour
-  'ice shield',    // +1d6 armour
-  'second sight',  // foe dice -2
-  'martyr',        // take 5 HP instead of foe's roll
-  'brain drain',   // spend magic for damage
-  'shadow fury',   // add weapon speeds to damage
-  'corruption',    // foe -2 brawn permanent
-  'rust',          // foe -2 armour permanent
-  'disrupt',       // foe -3 magic permanent
-  'cripple',       // foe -1 speed for 3 rounds
-  'rebound',       // +2 speed next round
-  'steal',         // copy a foe attribute
-  'feint',         // re-roll selected dice (mo type — was wrongly round-scoped)
-  'surefooted',    // re-roll all dice (mo type — was wrongly round-scoped)
+  'gut ripper',    'fallen hero',    'cauterise',      'tourniquet',
+  'second wind',   'eureka',         'stun',           'shackle',
+  'adrenaline',    'charge',         'time shift',     'blood rage',
+  'vampirism',     'meditation',     'haunt',           'bolt',
+  'raining blows', 'dark pact',      'consume',         'shadow speed',
+  'siphon',        'acid',           'sear',
+  // ── Glossary default: once per combat for ALL (mo) abilities ──────────────
+  // (co) abilities are handled by the type block — listed here only for display
+  // clarity and as a reference. The matchesOnce() check only matters for (mo).
+  // LoS (mo):
+  'mend',          'dominate',       'fortitude',      'focus',
+  'vanquish',      'savagery',       'bright shield',  'iron will',
+  'might of stone','ice shield',     'second sight',   'martyr',
+  'brain drain',   'shadow fury',    'disrupt',        'cripple',
+  'rebound',       'steal',          'feint',          'surefooted',
+  // HoF (mo):
+  'agility',       'atonement',      'bless',          'blessed blades',
+  'blood thief',   'bloody maiden',  'boneshaker',     'bright spark',
+  "bull's eye",    'choke hold',     'cold snap',      'cruel twist',
+  'cunning',       'darksilver',     'deceive',        'distraction',
+  'fear',          'finesse',        'freeze',         'frost burn',
+  'frost guard',   'ghost',          'hooked',         'ice slick',
+  'insight',       'intimidate',     'malice',         'mental freeze',
+  'mortal wound',  'pain barrier',   'parasite',       'protection',
+  'reaper',        'recall',         'resolve',        'silver frost',
+  'sixth sense',   'sneak',          'sure edge',      'tactics',
+  'torrent',       'trickster',      'watchful',
+  // EoWF (mo) — same names as HoF where shared, plus new ones:
+  'augment',       'blood oath',     'bull guard',     'conflagration',
+  'crystal armour','cyclone',        'dogged determination', 'energy boost',
+  'expertise',     'faithful friend','fortress',       'freerunner',
+  'ghost',         'gluttony',       'gorilla rage',   'heartless',
+  'high five',     'hypnotise',      'last defence',   'magic tap',
+  'mangle',        'mind fumble',    'near death',     'paralysis',
+  'penance',       "pick 'n' mix",   'purge',          'quick draw',
+  'redemption',    'refresh',        'resurrection',   'roll with it',
+  'sinking sand',  'slipstream',     'somersault',     'spirit ward',
+  'suppress',      'sure grip',      'throwing knives','tormented soul',
+  'underhand',     'unstoppable',    'usurper',        'volatile mix',
+  'war paint',     'wild child',     'wisdom',
 ]);
 const matchesOnce = (k) => [...ONCE_PER_COMBAT].some(n => k.includes(n));
 
@@ -3368,9 +3360,9 @@ function AbilitiesTab({ hero, setHero }) {
   const typeKey = { speed:'sp', combat:'co', passive:'pa', modifier:'mo' };
 
   // stackable: abilities where EACH EQUIPPED ITEM COPY grants one use.
-  // Do NOT add once-per-combat or once-per-round modifiers here — that would
-  // allow players to add them to the tracker multiple times and activate each copy.
-  const stackable = ['charm','heal','regrowth','mend'];
+  // Glossary: charm (FAQ Q5), heal, regrowth, channel (HoF/Dune), greater heal/healing (EoWF/HoF).
+  // mend is NOT stackable — once per combat regardless of copies owned.
+  const stackable = ['charm','heal','regrowth','channel','greater heal','greater healing'];
 
   const addAbilityToTracker = (type, name) => {
     const key = keyMap[type] || 'combat';
@@ -3668,6 +3660,10 @@ function CombatRoundTracker({ hero, showRoundTracker, setShowRoundTracker,
     'gut ripper','raining blows','patchwork pauper',
   ]);
 
+  // Glossary default: once per combat for ALL abilities.
+  // sp → once per combat. co → once per combat (not once per round — combat example confirms this).
+  // mo → once per combat unless explicitly stated otherwise (last laugh LoS = unlimited).
+  // Execution (sp) is the only ability explicitly once per ROUND.
   const isOPC = (name) => OPC_SET.has(name.toLowerCase())
     || ['once per combat','can only be used once'].some(k => {
         const ab = ABILITY_DB.find(a => a.name.toLowerCase() === name.toLowerCase());
@@ -3676,11 +3672,12 @@ function CombatRoundTracker({ hero, showRoundTracker, setShowRoundTracker,
 
   const toggleRT = (name, type, slotKey) => {
     if (type === 'pa') return;
-    const opc = isOPC(name) || type === 'sp';
-    if (opc) {
-      setRtUsedThisCombat(s => { const n=new Set(s); n.has(slotKey)?n.delete(slotKey):n.add(slotKey); return n; });
-    } else {
+    // execution is the only per-round ability — everything else is per-combat
+    const isPerRound = name.toLowerCase() === 'execution';
+    if (isPerRound) {
       setRtUsedThisRound(s => { const n=new Set(s); n.has(slotKey)?n.delete(slotKey):n.add(slotKey); return n; });
+    } else {
+      setRtUsedThisCombat(s => { const n=new Set(s); n.has(slotKey)?n.delete(slotKey):n.add(slotKey); return n; });
     }
   };
 
@@ -3713,17 +3710,19 @@ function CombatRoundTracker({ hero, showRoundTracker, setShowRoundTracker,
           {/* Legend */}
           <div style={{fontSize:10,color:'rgba(139,105,20,0.4)',fontStyle:'italic',marginBottom:4,lineHeight:1.5}}>
             <span style={{color:'#4a9eff',fontFamily:'Cinzel,serif',fontSize:8,letterSpacing:1}}>SP</span> once/combat ·{' '}
-            <span style={{color:'#c0392b',fontFamily:'Cinzel,serif',fontSize:8,letterSpacing:1}}>CO</span> once/round ·{' '}
-            <span style={{color:'var(--gold)',fontFamily:'Cinzel,serif',fontSize:8,letterSpacing:1}}>MO</span> unlimited ·{' '}
+            <span style={{color:'#c0392b',fontFamily:'Cinzel,serif',fontSize:8,letterSpacing:1}}>CO</span> once/combat ·{' '}
+            <span style={{color:'var(--gold)',fontFamily:'Cinzel,serif',fontSize:8,letterSpacing:1}}>MO</span> once/combat ·{' '}
             <span style={{color:'#6dbf6d',fontFamily:'Cinzel,serif',fontSize:8,letterSpacing:1}}>PA</span> always active
+            {' '}· (Execution: once/round)
           </div>
           {allAbils.map((ab, i) => {
             // Give each duplicate ability its own slot key so they track independently
             const dupsBefore = allAbils.slice(0, i).filter(x => x.name.toLowerCase() === ab.name.toLowerCase()).length;
             const slotKey   = dupsBefore > 0 ? `${ab.name}_slot_${dupsBefore}` : ab.name;
-            const opc     = isOPC(ab.name) || ab.type === 'sp';
-            const usedR   = (ab.type==='co'||ab.type==='mo') && rtUsedThisRound.has(slotKey);
-            const usedC   = opc && rtUsedThisCombat.has(slotKey);
+            // execution is the only per-round ability
+            const isPerRound = ab.name.toLowerCase() === 'execution';
+            const usedR   = isPerRound && rtUsedThisRound.has(slotKey);
+            const usedC   = !isPerRound && ab.type !== 'pa' && rtUsedThisCombat.has(slotKey);
             const isUsed  = usedR || usedC;
             const isPA    = ab.type === 'pa';
             const typeCol = TYPE_COLOR[ab.type] || 'var(--gold)';
@@ -4715,17 +4714,22 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     const key = name.toLowerCase();
 
     // ── Multi-use: one use per item copy ────────────────────────────────────
-    // FAQ Q5 (Da Boss): only heal, charm, and regrowth get one use per item copy.
-    // mend is NOT in this list — it is once per combat like every other ability.
-    const multiUseAbils = ['charm','heal','regrowth'];
+    // heal, charm, regrowth: FAQ Q5 (Da Boss) — one use per equipped item copy.
+    // channel, greater heal, greater healing: same per-copy rule per their glossary entries.
+    // deadly dance: (sp) EoWF — exactly 2 uses per combat (handled via totalAllowed=2).
+    // All other abilities: once per combat via ONCE_PER_COMBAT or type block below.
+    const multiUseAbils = ['charm','heal','regrowth','channel','greater heal','greater healing'];
     const isMultiUse = multiUseAbils.some(n => key === n);
-    if (isMultiUse) {
-      const equippedCount = Object.values(hero.equipment).filter(item =>
-        item?.ability?.name?.toLowerCase() === key
-      ).length;
-      const trackedCount = (hero.specialAbilities?.modifier || []).filter(a => a.toLowerCase() === key).length
-                         + (hero.specialAbilities?.combat  || []).filter(a => a.toLowerCase() === key).length;
-      const totalAllowed = Math.max(1, equippedCount, trackedCount);
+    const isDeadlyDance = key === 'deadly dance';
+    if (isMultiUse || isDeadlyDance) {
+      const totalAllowed = isDeadlyDance ? 2 : (() => {
+        const equippedCount = Object.values(hero.equipment).filter(item =>
+          item?.ability?.name?.toLowerCase() === key
+        ).length;
+        const trackedCount = (hero.specialAbilities?.modifier || []).filter(a => a.toLowerCase() === key).length
+                           + (hero.specialAbilities?.combat  || []).filter(a => a.toLowerCase() === key).length;
+        return Math.max(1, equippedCount, trackedCount);
+      })();
       const usedCount = [...usedOnce].filter(k => k.startsWith(key + '_use_')).length;
       if (usedCount >= totalAllowed) {
         addLog(`${name} — all ${totalAllowed} use(s) spent this combat.`, 'log-passive'); return;
@@ -4740,11 +4744,13 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     // ── True once-per-combat abilities ───────────────────────────────────────
     } else {
       // ONCE_PER_COMBAT and matchesOnce() are defined at module scope (above ABILITY_DB).
-      // Abilities that are explicitly UNLIMITED or have no stated limit:
-      // last laugh (LoS only — no limit; later books once per combat per desc note),
-      // tourniquet, brain drain, windwalker,
-      // second sight, steal, deceive/trickster, shadow speed, consume, rebound,
-      // shadow fury, and all other modifiers not listed above.
+      // Abilities NOT tracked here (intentional exceptions):
+      //   last laugh (LoS: no stated limit — unlimited in LoS only)
+      //   pack spirit (Dune Sea: explicitly usable multiple times per combat)
+      //   beguile (HoF: governs another ability, not itself consumed)
+      //   channel / greater heal / greater healing: per-item-copy (handled above as multiUseAbils)
+      //   water jets (Dune Sea): per-round (handled in per-round block below)
+      //   deadly dance (EoWF): 2 uses per combat (handled above as isDeadlyDance)
 
       if (matchesOnce(key)) {
         if (usedOnce.has(key)) {
@@ -4755,17 +4761,17 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     }
 
     // ── Enforcement by ability type ───────────────────────────────────────────
-    // Glossary rule: "each ability can only be used once during a combat."
-    // Speed (sp): once per combat — tracked via usedOnce.
-    //   Exception: execution is once per ROUND (re-usable each round), tracked via usedThisRound.
-    // Combat (co): once per round — tracked via usedThisRound (resets each round).
-    //   Exception: combat abilities already in ONCE_PER_COMBAT (gut ripper, etc.) bypass this.
+    // Glossary default: "each ability can only be used once during a combat."
+    // Combat example (advanced) confirms this: abilities like deep wound and
+    // piercing say "no combat abilities to play" once used, not "already used
+    // this round". No (co) ability says "each combat round" except Execution.
     //
-    // Note: This is the correct rule. Speed abilities like haste, courage, quicksilver, etc.
-    // all say "once per combat" in the Glossary. The old code wrongly allowed them every round.
+    // Speed (sp):   once per combat → usedOnce
+    // Combat (co):  once per combat → usedOnce  (NOT per-round — that was wrong)
+    //   Exception: execution is explicitly once per ROUND per glossary
+    // Modifier (mo): tracked via ONCE_PER_COMBAT set (already handled above)
 
-    if (type === 'sp' && key !== 'execution') {
-      // Once-per-combat for all speed abilities (except execution which is once-per-round)
+    if (type === 'sp' && key !== 'execution' && key !== 'deadly dance' && !key.includes('water jets')) {
       if (usedOnce.has(key)) {
         addLog(`${name} already used this combat.`, 'log-passive'); return;
       }
@@ -4773,15 +4779,16 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     }
 
     if (type === 'co') {
-      // Once-per-round for combat abilities (unless already guarded by ONCE_PER_COMBAT above)
-      if (usedThisRound.has(key)) {
-        addLog(`${name} already used this round.`, 'log-passive'); return;
+      // Once-per-combat for all combat abilities (unless already guarded by ONCE_PER_COMBAT above)
+      if (usedOnce.has(key)) {
+        addLog(`${name} already used this combat.`, 'log-passive'); return;
       }
-      setUsedThisRound(prev => new Set([...prev, key]));
+      setUsedOnce(prev => new Set([...prev, key]));
     }
 
-    // Execution: once per round (speed type but round-scoped)
-    if (key === 'execution') {
+    // Execution: once per round (the only co/sp ability with an explicit per-round rule)
+    // Water jets (Dune Sea mo): "once per combat round" — explicitly per-round
+    if (key === 'execution' || key.includes('water jets')) {
       if (usedThisRound.has(key)) {
         addLog(`${name} already used this round.`, 'log-passive'); return;
       }
@@ -5026,7 +5033,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       // Glossary: "when your opponent's damage score/damage dice causes health damage" — foe must have won
       if (winner !== 'foe') {
         addLog(`${name}: only usable when the opponent wins the round.`, 'log-passive');
-        setUsedThisRound(prev => { const s=new Set(prev); s.delete(key); return s; }); return;
+        setUsedOnce(prev => { const s=new Set(prev); s.delete(key); return s; }); return;
       }
       const d=rollD6();
       setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-d)}:f));
@@ -5035,7 +5042,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       // Glossary: "when your opponent's damage score/damage dice causes health damage" — foe must win
       if (winner !== 'foe') {
         addLog(`${name}: only usable when the opponent wins the round.`, 'log-passive');
-        setUsedThisRound(prev => { const s=new Set(prev); s.delete(key); return s; }); return;
+        setUsedOnce(prev => { const s=new Set(prev); s.delete(key); return s; }); return;
       }
       const d1=rollD6(),d2=rollD6();
       const dmg=d1+d2;
@@ -5045,7 +5052,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       // Glossary: "when you take health damage from your opponent's damage score" — foe must win
       if (winner !== 'foe') {
         addLog(`${name}: only usable when the opponent wins the round.`, 'log-passive');
-        setUsedThisRound(prev => { const s=new Set(prev); s.delete(key); return s; }); return;
+        setUsedOnce(prev => { const s=new Set(prev); s.delete(key); return s; }); return;
       }
       const dmg=Math.ceil(effectiveSpeed/2);
       setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-dmg)}:f));
@@ -5054,7 +5061,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       // Glossary: "when you take health damage from your opponent's damage score" — foe must win
       if (winner !== 'foe') {
         addLog(`${name}: only usable when the opponent wins the round.`, 'log-passive');
-        setUsedThisRound(prev => { const s=new Set(prev); s.delete(key); return s; }); return;
+        setUsedOnce(prev => { const s=new Set(prev); s.delete(key); return s; }); return;
       }
       setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-effectiveArmour)}:f));
       addLog(`${name}: ${effectiveArmour} (armour) dmg back to foe (ignores armour)`, 'log-hit');
@@ -5282,7 +5289,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         addLog(`${name}: 🎯 Click a [6] on the foe's dice to turn it to [1].`, 'log-roll');
       } else {
         addLog(`${name}: foe has no [6] to change.`, 'log-passive');
-        setUsedThisRound(prev => { const s=new Set(prev); s.delete(key); return s; });
+        setUsedOnce(prev => { const s=new Set(prev); s.delete(key); return s; });
       }
     } else if (key.includes('deceive') || key.includes('trickster')) {
       // Interactive: player picks one hero die, then one foe die to swap
@@ -5292,7 +5299,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         addLog(`${name}: 🎯 Click one of YOUR dice to swap, then click a foe die.`, 'log-roll');
       } else {
         addLog(`${name}: no dice available to swap.`, 'log-passive');
-        setUsedThisRound(prev => { const s=new Set(prev); s.delete(key); return s; });
+        setUsedOnce(prev => { const s=new Set(prev); s.delete(key); return s; });
       }
     } else if (key.includes('steal')) {
       addLog(`${name}: raise one of your attributes to match foe's — apply manually then undo after round.`, 'log-roll');
@@ -5713,13 +5720,19 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     const abilityButton = (name, type, color, slotIndex = 0) => {
       const key = name.toLowerCase();
       const usedRound = usedThisRound.has(key);
-      // FAQ Q5 (Da Boss): only heal, charm, regrowth are multi-use. mend is once per combat.
-      const multiUseAbils = ['charm','heal','regrowth'];
+      // Multi-use: one use per equipped item copy (FAQ Q5 + glossary for channel/greater heal)
+      // Deadly dance: exactly 2 uses per combat
+      const multiUseAbils = ['charm','heal','regrowth','channel','greater heal','greater healing'];
       const isMulti = multiUseAbils.some(n => key === n);
+      const isDeadlyDance = key === 'deadly dance';
       let usedCombat = usedOnce.has(key);
       if (isMulti) {
         const slotKey = `${key}_use_${slotIndex + 1}`;
         usedCombat = usedOnce.has(slotKey);
+      } else if (isDeadlyDance) {
+        // Show as fully used only when both uses are spent
+        const usedCount = [...usedOnce].filter(k => k.startsWith('deadly dance_use_')).length;
+        usedCombat = usedCount >= 2;
       }
       const isUsed = usedRound || usedCombat;
       const typeLabel = ABILITY_TYPE_LABEL[type] || type;
@@ -6023,7 +6036,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
                   onClick={()=>{
                     setPendingDiceAction(null);setSwapHeroDieIdx(null);
                     const key=pendingDiceAction.includes('charm')?'charm':pendingDiceAction.includes('swap')?'deceive':'';
-                    if(key) setUsedThisRound(prev=>{const s=new Set(prev);s.delete(key);s.delete('trickster');return s;});
+                    if(key) setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);s.delete('trickster');return s;});
                   }}>Cancel</button>
               </div>
             )}
@@ -6581,8 +6594,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
                         cursor:'pointer',borderRadius:1,background:'rgba(0,0,0,0.3)',
                         border:'1px solid rgba(90,74,32,0.4)',color:'var(--parchment-dark)'}}
                         onClick={()=>{setPendingDiceAction(null);
-                          setUsedThisRound(prev=>{const s=new Set(prev);s.delete('dominate');return s;});
-                          // also undo usedOnce if it was once-per-combat
+                          setUsedOnce(prev=>{const s=new Set(prev);s.delete('dominate');return s;});
                         }}>Cancel</button>
                     </div>
                   )}
