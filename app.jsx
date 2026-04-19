@@ -4318,6 +4318,11 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
 
   const seeingRedActive = hasSeeingRed && heroHp <= 20;
 
+  // Blood Frenzy (EoWF/Dune pa): if a bleed effect is in play, speed +1 (reactive like Seeing Red)
+  // Must be declared BEFORE effectiveSpeed since effectiveSpeed uses it.
+  const bleedInPlay = heroPassives.bleed || foes.some(f=>f.heroDoTs?.bleed);
+  const bloodFrenzyBonus = (hasBloodFrenzy && bleedInPlay) ? 1 : 0;
+
   // Effective speed with all bonuses
   const effectiveSpeed = computed.speed
     + (seeingRedActive ? 2 : 0)
@@ -4348,9 +4353,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
   const dieBonusPerDie = searAcidBonus + sureEdgeBonus + dancingRapierBonus + rebukeBonus + shadesBonus; // full damage score rolls only
   const dieBonusNoScore = shadesBonus;                // instead-of-score abilities (no sear/acid/sure edge/rebuke)
 
-  // Blood Frenzy (EoWF/Dune pa): if a bleed effect is in play, speed +1 (reactive like Seeing Red)
-  const bleedInPlay = heroPassives.bleed || foes.some(f=>f.heroDoTs?.bleed);
-  const bloodFrenzyBonus = (hasBloodFrenzy && bleedInPlay) ? 1 : 0;
+  // (bloodFrenzyBonus and bleedInPlay declared above effectiveSpeed)
 
   const hasPreCombat = hasFirstStrike || hasFirstCut || hasBullsEye || hasSnakeStrike;
 
@@ -7169,20 +7172,24 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     const PRE_DAMAGE_COMBAT   = ['deep wound','feral fury','overload','windwalker','piercing','fatal blow',
       'rake','backfire','bolt','ice shard','ignite','cleave','black rain','nature\'s revenge',
       'shadow fury','shield wall','thorn armour','haunt','puncture',
-      // Dune/EoWF/HoF new:
+      // Dune/EoWF/HoF:
       'deadsilver','fireball','furious sweep','leech strike','melt armour','poison cloud',
       'scythe','skewer','thorn shield','sunstroke','shock blast','nail gun','innovation',
       'acuity','wave','arcane feast','savage call','scarab swarm','blinding rays','rend',
       'virulence','frostbite','stagger','shatter','blood hail','double punch','trample',
       'volley','flurry','swarm','slick','packmaster','monkey mob','thorn cage','primal',
-      'ley line infusion','compulsion','charm offensive','blood hail','sand dance',
-      'shroud burst','from shadows','combustion','immolation'];
+      'ley line infusion','compulsion','charm offensive','sand dance',
+      'shroud burst','from shadows','combustion','immolation',
+      // Extra missing:
+      'impale','pound','surge','lash','splinters','snakes alive','heavy blow','corrode',
+      'blind strike','backstab','ensnare','hamstring','wither','demon spines','zapped',
+      'snake strike'];
     const PRE_DAMAGE_DODGE    = ['sidestep','evade','vanish','spider sense','dodge','command',
       'brutality','deflect','overpower','banshee wail','parry','head butt','slam',
       'martyr','sacrifice',
       // Dune/EoWF/HoF new:
       'dark distraction','glimmer dust','gloom','misdirection','confound','veil',
-      'prophecy','blink'];
+      'prophecy','blink','dirge'];
     const POST_DAMAGE_MODS    = ['dominate','critical strike','gut ripper','raining blows',
       'second sight','corruption','rust','disrupt','cripple','shock','rebound',
       'retaliation','riposte','sideswipe','spore cloud','thorn fist',
@@ -7200,14 +7207,16 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       'cunning','malice','mortal wound','resolve','frost burn','darksilver','frost guard',
       'fear','mind fumble','recall','torrent','sure edge','mind flay','boneshaker',
       'charged shot','fire pact','vigour mortis','life charge','blood oath','gluttony',
-      'shadow well','shroud burst','trojan exploit','dark haze','misdirection',
+      'shadow well','shroud burst','trojan exploit','dark haze',
       // HoF new:
       'atonement','blood thief','bright spark','charm offensive','cruel twist',
       'faithful friend','high five','hooked','hypnotise','insight','last defence',
       'magic tap','mangle','near death','penance','purge','redemption','refresh',
       'roll with it','silver frost','spirit ward','suppress','sure grip','underhand',
       'unstoppable','wisdom','wish master','agility',
-      'inner focus','savagery','malice','mortal wound'];
+      'inner focus','savagery','malice','mortal wound',
+      // Extra missing HoF/all:
+      'bless','consume','heartless','war paint','water jets','adrenaline'];
 
     const isPhase = (p) => phase === p;
     const showSpeed    = isPhase('initiative') || isPhase('precombat');
