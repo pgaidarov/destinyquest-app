@@ -4561,18 +4561,28 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       const updatedFoesInit = foes.map(f => {
         if (f.hp <= 0) return f;
         // foeDiceOverride: player can manually adjust how many dice a foe rolls (foe abilities)
-        const foeDiceCount = Math.max(1, 2 - cmods.foeDiceReduction - (f.speedPenalty||0) + (foeDiceOverride[f.id]||0));
+        // foeDiceReduction: from stun/knockdown/shackle — reduces dice count for this round
+        // speedPenalty is a STAT modifier (lowers speed score), NOT a dice count modifier — do NOT subtract it here
+        const foeDiceCount = Math.max(1, 2 - cmods.foeDiceReduction + (foeDiceOverride[f.id]||0));
         const fd = Array.from({length: foeDiceCount}, rollD6);
         let foeExtra = { ...f, dice: fd };
 
-        // Cripple tick-down — remove speed penalty when it expires
-        if (f.crippleRoundsLeft > 0) {
+        // Cripple tick-down — 3 active rounds, then remove speed penalty.
+        // -1 is a sentinel meaning "last round just ended, remove penalty on this round's init".
+        // This prevents the off-by-one where the penalty was removed BEFORE the 3rd round resolved.
+        if (f.crippleRoundsLeft === -1) {
+          // Previous round was the last active round; remove the penalty now.
+          foeExtra.speedPenalty = Math.max(0, (foeExtra.speedPenalty||0) - 1);
+          foeExtra.crippleRoundsLeft = 0;
+          addLog(`Cripple expired on ${f.name} — speed restored.`, 'log-passive');
+        } else if (f.crippleRoundsLeft > 0) {
           const newRoundsLeft = f.crippleRoundsLeft - 1;
-          foeExtra.crippleRoundsLeft = newRoundsLeft;
           if (newRoundsLeft === 0) {
-            // Remove the 1 speed point that cripple added
-            foeExtra.speedPenalty = Math.max(0, (foeExtra.speedPenalty||0) - 1);
-            addLog(`Cripple expired on ${f.name} — speed restored.`, 'log-passive');
+            // This is the 3rd (last) active round — penalty still applies THIS round.
+            // Set sentinel so it will be removed at the START of the next round.
+            foeExtra.crippleRoundsLeft = -1;
+          } else {
+            foeExtra.crippleRoundsLeft = newRoundsLeft;
           }
         }
 
@@ -4606,12 +4616,14 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         addLog(`${f.name}: [${f.dice.join('][')}] +${fSpd}spd = ${fTotal}`, 'log-roll');
         if (fTotal > highestFoeTotal) { highestFoeTotal = fTotal; leadFoe = f; }
       });
-      // Clear per-foe round-scoped penalties now that this round's speed has been computed
+      // Clear speedPenaltyThisRound now that this round's speed has been computed.
+      // brawnPenaltyThisRound and magicPenaltyThisRound are intentionally NOT cleared here —
+      // they must remain active through the damage phase so Zapped!'s brawn/magic penalty
+      // affects the foe's damage roll in the same round it was cast.
+      // They are cleared at end of round in applyPassives instead.
       setFoes(fs => fs.map(f => ({
         ...f,
         speedPenaltyThisRound: 0,
-        brawnPenaltyThisRound: 0,
-        magicPenaltyThisRound: 0,
       })));
 
       // Life Spark / Dark Claw check on hero initiative dice.
@@ -4672,7 +4684,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         const keepSpeedBonus = keepAdrenalineBonus || keepTimeShiftBonus;
         return ({
         ...prev,
-        extraSpeedDice: keepAdrenalineBonus ? prev.extraSpeedDice : 0,
+        extraSpeedDice: 0, // always reset per-round — Adrenaline gives +2 speed (stat), not extra dice
         speedBonus: keepSpeedBonus ? prev.speedBonus : (prev.reboundActive ? 2 : 0),
         reboundActive: false,
         armourBonus: 0,
@@ -4796,8 +4808,10 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       //   channel / greater heal / greater healing: per-item-copy (handled above as multiUseAbils)
       //   water jets (Dune Sea): per-round (handled in per-round block below)
       //   deadly dance (EoWF): 2 uses per combat (handled above as isDeadlyDance)
+      //   bolt: two-phase (charge then release) — self-managed via 'bolt_released' in usedOnce;
+      //         the external guard MUST NOT fire on the release click or it will block it.
 
-      if (matchesOnce(key)) {
+      if (matchesOnce(key) && key !== 'bolt') {
         if (usedOnce.has(key)) {
           addLog(`${name} already used this combat.`, 'log-passive'); return;
         }
@@ -4814,6 +4828,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     // Speed (sp):   once per combat → usedOnce
     // Combat (co):  once per combat → usedOnce  (NOT per-round — that was wrong)
     //   Exception: execution is explicitly once per ROUND per glossary
+    //   Exception: bolt — two-phase; usage tracked internally via 'bolt_released'
     // Modifier (mo): tracked via ONCE_PER_COMBAT set (already handled above)
 
     if (type === 'sp' && key !== 'execution' && key !== 'deadly dance' && !key.includes('water jets')) {
@@ -4823,8 +4838,9 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       setUsedOnce(prev => new Set([...prev, key]));
     }
 
-    if (type === 'co') {
-      // Once-per-combat for all combat abilities (unless already guarded by ONCE_PER_COMBAT above)
+    if (type === 'co' && key !== 'bolt') {
+      // Bolt is exempt — it has two phases (charge + release) and self-manages its state.
+      // Once-per-combat for all other combat abilities.
       if (usedOnce.has(key)) {
         addLog(`${name} already used this combat.`, 'log-passive'); return;
       }
@@ -5027,20 +5043,20 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       setPhase('post-damage');
     } else if (key.includes('brutality') || key.includes('deflect') || key.includes('overpower') ||
                key.includes('banshee wail') || key.includes('parry') || key.includes('head butt') || key.includes('slam')) {
-      // Stop foe damage + deal 2 dice back (brutality/deflect/overpower) or just stop (parry/head butt/slam)
+      // Stop foe damage + deal 2 dice back (brutality/deflect/overpower) or just stop (parry/head butt/slam/banshee wail)
       if (winner==='foe') {
         if (['brutality','deflect','overpower'].some(n=>key.includes(n))) {
           const d1=rollD6(),d2=rollD6();
           const dmg=d1+d2;
           setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-dmg)}:f));
           addLog(`${name}: foe damage negated! [${d1}]+[${d2}]=${dmg} back to foe (ignores armour)`, 'log-hit');
-          if (key.includes('slam')) {
-            // "In the next combat round, your opponent's speed is reduced by 1."
-            // Use slamSpeedPenalty carry (cleared after one round), NOT permanent speedPenalty.
-            setCmods(p=>({...p, slamSpeedPenalty: (p.slamSpeedPenalty||0)+1}));
-          }
         } else {
           addLog(`${name}: foe damage negated! Round ends.`, 'log-passive');
+        }
+        // Slam: "In the next combat round, your opponent's speed is reduced by 1."
+        // Apply OUTSIDE the counterattack branch so it actually fires for Slam.
+        if (key.includes('slam')) {
+          setCmods(p=>({...p, slamSpeedPenalty: (p.slamSpeedPenalty||0)+1}));
         }
         setCmods(p=>({...p, dodgeActive:true}));
         setPhase('post-damage');
@@ -5179,9 +5195,11 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     } else if (key.includes('shock!') || key.includes('shock')) {
       const target = foes.find(f=>f.id===activeFoeId);
       if (target) {
-        const shockDmg = Math.ceil((parseInt(target.armour)||0)/2);
+        // Glossary: "1 extra damage for every 2 points of armour your opponent is wearing" — effective armour after penalties
+        const effectiveFoeArmour = Math.max(0, (parseInt(target.armour)||0) - (target.armourPenalty||0));
+        const shockDmg = Math.ceil(effectiveFoeArmour / 2);
         setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-shockDmg)}:f));
-        addLog(`${name}: ${shockDmg} extra dmg (${target.armour} armour ÷ 2)`, 'log-hit');
+        addLog(`${name}: ${shockDmg} extra dmg (effective armour ${effectiveFoeArmour} ÷ 2, rounds up)`, 'log-hit');
       }
 
     // ── Modifier abilities ─────────────────────────────────────────────────
@@ -5240,29 +5258,69 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         setUsedOnce(prev => { const s=new Set(prev); s.delete(key); return s; });
       }
     } else if (key.includes('last laugh')) {
-      // Reroll all foe dice immediately
-      const updatedFoes = foes.map(f => {
-        if (f.hp <= 0) return f;
-        const newFoeDice = f.dice.map(()=>rollD6());
-        return {...f, dice: newFoeDice};
-      });
-      setFoes(updatedFoes);
-      addLog(`${name}: foe dice re-rolled!`, 'log-roll');
-      // Log new foe totals and recalculate winner
-      const carrySpeedPenalty = cmods.poundSpeedPenalty + cmods.surgeSpeedPenalty + cmods.impaleSpeedPenalty;
-      const heroSpd = Math.max(0, computed.speed + (seeingRedActive?2:0) + cmods.speedBonus - carrySpeedPenalty);
-      const hTotal = heroDice.reduce((a,b)=>a+b,0) + heroSpd;
-      let highestFoeTotal=0, leadFoe=null;
-      updatedFoes.filter(f=>f.hp>0).forEach(f=>{
-        const fSpd=Math.max(0,(parseInt(f.speed)||0)-(f.speedPenalty||0)-cmods.foeSpeedPenaltyThisRound);
-        const fTotal=f.dice.reduce((a,b)=>a+b,0)+fSpd;
-        addLog(`${f.name} re-rolled: [${f.dice.join('][')}]+${fSpd}=${fTotal}`, 'log-roll');
-        if(fTotal>highestFoeTotal){highestFoeTotal=fTotal;leadFoe=f;}
-      });
-      const newWinner = hTotal>highestFoeTotal?'hero':highestFoeTotal>hTotal?'foe':'tie';
-      setWinner(newWinner);
-      if(leadFoe) setActiveFoeId(leadFoe.id);
-      addLog(newWinner==='hero'?`${hero.name} now wins the roll!`:newWinner==='foe'?`${leadFoe?.name||'Foe'} still wins.`:'Stand-off.','log-roll');
+      // Glossary: "force your opponent to re-roll all of their dice (for either their
+      // attack speed OR for their damage score)." Player must choose which.
+      const canRerollSpeed  = phase === 'post-roll' && foes.some(f=>f.hp>0 && f.dice.length>0);
+      const canRerollDamage = (phase === 'pre-damage' || phase === 'post-damage') && damageWinner === 'foe' && damageDice.length > 0;
+
+      const doSpeedReroll = () => {
+        const updatedFoes = foes.map(f => {
+          if (f.hp <= 0) return f;
+          return {...f, dice: f.dice.map(()=>rollD6())};
+        });
+        setFoes(updatedFoes);
+        addLog(`${name} (speed): foe speed dice re-rolled!`, 'log-roll');
+        const carrySpeedPenalty = cmods.poundSpeedPenalty + cmods.surgeSpeedPenalty + cmods.impaleSpeedPenalty;
+        const heroSpd = Math.max(0, computed.speed + (seeingRedActive?2:0) + cmods.speedBonus - carrySpeedPenalty);
+        const hTotal = heroDice.reduce((a,b)=>a+b,0) + heroSpd;
+        let highestFoeTotal=0, leadFoe=null;
+        updatedFoes.filter(f=>f.hp>0).forEach(f=>{
+          const fSpd=Math.max(0,(parseInt(f.speed)||0)-(f.speedPenalty||0)-cmods.foeSpeedPenaltyThisRound);
+          const fTotal=f.dice.reduce((a,b)=>a+b,0)+fSpd;
+          addLog(`${f.name} re-rolled: [${f.dice.join('][')}]+${fSpd}=${fTotal}`, 'log-roll');
+          if(fTotal>highestFoeTotal){highestFoeTotal=fTotal;leadFoe=f;}
+        });
+        const newWinner = hTotal>highestFoeTotal?'hero':highestFoeTotal>hTotal?'foe':'tie';
+        setWinner(newWinner);
+        if(leadFoe) setActiveFoeId(leadFoe.id);
+        addLog(newWinner==='hero'?`${hero.name} now wins the roll!`:newWinner==='foe'?`${leadFoe?.name||'Foe'} still wins.`:'Stand-off.','log-roll');
+      };
+
+      const doDamageReroll = () => {
+        const foe = foes.find(f=>f.id===activeFoeId);
+        const foeDmgAttr = foe?.usesMagic
+          ? Math.max(0,(parseInt(foe.magic)||0)-(foe.magicPenalty||0)-(foe.magicPenaltyThisRound||0))
+          : Math.max(0,(parseInt(foe.brawn)||0)-(foe.brawnPenalty||0)-(foe.brawnPenaltyThisRound||0));
+        const newDice = damageDice.map(()=>rollD6());
+        const adjDice = newDice.map(d => cmods.secondSightActive ? Math.max(1,d-2) : d);
+        const diceSum = adjDice.reduce((a,b)=>a+b,0);
+        const dmgScore = diceSum + foeDmgAttr;
+        const heroArm = effectiveArmour;
+        const newRoundDamage = Math.max(0, dmgScore - heroArm);
+        setDamageDice(newDice);
+        setRoundDamage(newRoundDamage);
+        const ssNote = cmods.secondSightActive ? ` (second sight -2 each)` : '';
+        addLog(`${name} (damage): foe damage re-rolled [${adjDice.join('][')}]${ssNote}+${foeDmgAttr}=${dmgScore} vs ${heroArm}arm → ${newRoundDamage}dmg`, 'log-roll');
+      };
+
+      if (canRerollSpeed && canRerollDamage) {
+        // Edge case: mo ability used in a phase where both are valid — let player choose
+        setPendingChoiceAction({
+          abilityName: name,
+          options: [
+            { label: 'Re-roll Speed dice',  onPick: doSpeedReroll },
+            { label: 'Re-roll Damage dice', onPick: doDamageReroll },
+          ],
+        });
+      } else if (canRerollSpeed) {
+        doSpeedReroll();
+      } else if (canRerollDamage) {
+        doDamageReroll();
+      } else {
+        addLog(`${name}: no foe speed or damage dice to re-roll right now.`, 'log-passive');
+        // Refund — nothing consumed
+        if (matchesOnce(key)) setUsedOnce(prev => { const s=new Set(prev); s.delete(key); return s; });
+      }
     } else if (key.includes('heal')) {
       const newHp = Math.min(computed.maxHealth, heroHp+4);
       setHeroHp(newHp);
@@ -5293,7 +5351,8 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
           { label: '+3 Armour', onPick: () => { setCmods(p=>({...p, armourBonus: p.armourBonus+3})); addLog(`${name}: +3 armour this round.`, 'log-roll'); } },
         ],
       });
-    } else if (key.includes('focus')) {
+    } else if (key === 'focus') {
+      // Exact match only — 'inner focus' must NOT be caught here (it has its own branch below).
       setCmods(p=>({...p, magicBonus: p.magicBonus+3}));
       addLog(`${name}: +3 magic this round.`, 'log-roll');
     } else if (key.includes('vanquish')) {
@@ -5340,9 +5399,28 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       setFoes(fs => fs.map(f => ({...f, heroDoTs:{venom:false,bleed:false,disease:false}})));
       addLog(`${name}: hero's Venom, Bleed and Disease cleared — DoT ticking stopped on all foes.`, 'log-heal');
     } else if (key.includes('brain drain')) {
-      const spend = Math.min(5, computed.magic + cmods.magicBonus);
-      setCmods(p=>({...p, damageBonus: p.damageBonus+spend, magicBonus: p.magicBonus-spend}));
-      addLog(`${name}: spent ${spend} magic for +${spend} damage.`, 'log-roll');
+      // Glossary: "You MAY spend magic… up to a maximum of 5 magic points."
+      // Player must choose how much to spend — auto-spending max is not rules-accurate.
+      const availMagic = computed.magic + cmods.magicBonus;
+      const maxSpend = Math.min(5, availMagic);
+      if (maxSpend <= 0) {
+        addLog(`${name}: no magic available to spend.`, 'log-passive');
+        setUsedOnce(prev => { const s=new Set(prev); s.delete(key); return s; });
+      } else {
+        setPendingChoiceAction({
+          abilityName: name,
+          options: Array.from({length: maxSpend}, (_, i) => {
+            const pts = i + 1;
+            return {
+              label: `Spend ${pts}`,
+              onPick: () => {
+                setCmods(p=>({...p, damageBonus: p.damageBonus+pts, magicBonus: p.magicBonus-pts}));
+                addLog(`${name}: spent ${pts} magic → +${pts} damage score this round.`, 'log-roll');
+              },
+            };
+          }),
+        });
+      }
     } else if (key.includes('consume')) {
       setCmods(p=>({...p, foeDiceReduction: p.foeDiceReduction+1}));
       addLog(`${name}: foe speed dice -1 (all dice minimum 1).`, 'log-roll');
@@ -5361,14 +5439,14 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         setUsedOnce(prev => { const s=new Set(prev); s.delete('second wind'); return s; });
       }
     } else if (key.includes('eureka') || key.includes('inner focus')) {
-      // LoS Eureka / Dune Sea Inner focus: speed, brawn, magic OR armour +1 — player must choose
+      // LoS Eureka / Dune Sea Inner Focus: raise speed, brawn OR magic by 1 — player must choose.
+      // Glossary (both books): "speed, brawn or magic score by 1". Armour is NOT an option.
       setPendingChoiceAction({
         abilityName: name,
         options: [
-          { label: '+1 Speed',  onPick: () => { setCmods(p=>({...p, speedBonus: p.speedBonus+1})); addLog(`${name}: +1 speed this round.`, 'log-roll'); } },
-          { label: '+1 Brawn',  onPick: () => { setCmods(p=>({...p, brawnBonus: p.brawnBonus+1})); addLog(`${name}: +1 brawn this round.`, 'log-roll'); } },
-          { label: '+1 Magic',  onPick: () => { setCmods(p=>({...p, magicBonus: p.magicBonus+1})); addLog(`${name}: +1 magic this round.`, 'log-roll'); } },
-          { label: '+1 Armour', onPick: () => { setCmods(p=>({...p, armourBonus: p.armourBonus+1})); addLog(`${name}: +1 armour this round.`, 'log-roll'); } },
+          { label: '+1 Speed', onPick: () => { setCmods(p=>({...p, speedBonus: p.speedBonus+1})); addLog(`${name}: +1 speed this round.`, 'log-roll'); } },
+          { label: '+1 Brawn', onPick: () => { setCmods(p=>({...p, brawnBonus: p.brawnBonus+1})); addLog(`${name}: +1 brawn this round.`, 'log-roll'); } },
+          { label: '+1 Magic', onPick: () => { setCmods(p=>({...p, magicBonus: p.magicBonus+1})); addLog(`${name}: +1 magic this round.`, 'log-roll'); } },
         ],
       });
     } else if (key.includes('watchful')) {
@@ -5799,6 +5877,12 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
 
     const foeSummary = finalFoesForCheck.filter(f=>f.hp>0).map(f=>`${f.name}:${f.hp}HP`).join('  ');
     addLog(`End of round ${round}. ${hero.name}:${newHeroHp}HP  |  ${foeSummary}`,'log-roll');
+
+    // Clear Zapped!'s brawn/magic round-scoped penalties at end of round.
+    // speedPenaltyThisRound was already cleared in rollInitiative after speed was computed.
+    // brawnPenaltyThisRound/magicPenaltyThisRound must survive through the damage phase
+    // (so they reduce the foe's damage score if foe wins), and are cleared here at round end.
+    setFoes(fs => fs.map(f => ({...f, brawnPenaltyThisRound: 0, magicPenaltyThisRound: 0})));
     setHeroDice([]); setDamageDice([]);
     setWinner(null); setDamageWinner(null); setRoundDamage(null);
     setPhase('initiative');
@@ -5852,7 +5936,8 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     const POST_DAMAGE_MODS    = ['dominate','critical strike','gut ripper','raining blows',
       'second sight','corruption','rust','disrupt','cripple','shock','rebound',
       'retaliation','riposte','sideswipe','spore cloud','thorn fist',
-      'judgement','avenging spirit','vampirism'];
+      'judgement','avenging spirit','vampirism',
+      'last laugh'];   // last laugh can reroll foe damage dice (glossary: speed OR damage score)
     const ANYTIME_MODIFIERS   = ['heal','regrowth','mend','fallen hero','focus','fortitude',
       'vanquish','savagery','bright shield','iron will','might of stone','ice shield',
       'brain drain','tourniquet','cauterise','second wind','eureka','steal',
@@ -5893,6 +5978,10 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         // Show as fully used only when both uses are spent
         const usedCount = [...usedOnce].filter(k => k.startsWith('deadly dance_use_')).length;
         usedCombat = usedCount >= 2;
+      } else if (key === 'bolt') {
+        // Bolt is two-phase: usedOnce has 'bolt' after charge (cosmetic) and 'bolt_released' after release.
+        // Only mark as fully "used ✗" after the release, not after charging.
+        usedCombat = usedOnce.has('bolt_released');
       }
       const isUsed = usedRound || usedCombat;
       const typeLabel = ABILITY_TYPE_LABEL[type] || type;
@@ -5919,7 +6008,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
             border:`1px solid ${isUsed?'rgba(90,74,32,0.25)':color}`,
             color:isUsed?'rgba(139,105,20,0.35)':color,
             textDecoration:isUsed?'line-through':'none',opacity:isUsed?0.6:1}}>
-          {name}{usedCombat?' ✗':''}
+          {name}{usedCombat?' ✗': key==='bolt' && cmods.boltReleaseActive?' ⚡':''}
         </button>
       );
     };
