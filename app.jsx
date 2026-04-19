@@ -4038,6 +4038,10 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     health:20, maxHealth:20, usesMagic:false,
     hp:20,
     passives:{ bleed:false, venom:false, disease:false, thorns:false, fire_aura:false },
+    // Per-foe flags for hero-inflicted DoTs. Only foes that have taken health damage
+    // from the hero get these ticking. Glossary: "they continue to take damage" — "they"
+    // is the opponent hit, not every opponent in the combat.
+    heroDoTs: { venom:false, bleed:false, disease:false },
     abilities:[],   // [{name, type, desc}] — from ABILITY_DB or freetext
     usedAbilities:[], // indices of abilities spent this combat
     dice:[],
@@ -4046,6 +4050,10 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     armourPenalty:0,     // accumulated armour reductions
     brawnPenalty:0,
     magicPenalty:0,
+    // per-foe round-scoped penalties (zapped and similar — should NOT leak to other foes)
+    speedPenaltyThisRound: 0,
+    brawnPenaltyThisRound: 0,
+    magicPenaltyThisRound: 0,
     haunted:false,       // haunt debuff active
     burned:false,        // burn debuff (from ignite)
     boltCharged:false,   // bolt ability primed
@@ -4190,6 +4198,11 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
   // For feint: which hero dice are selected to reroll (true = reroll)
   const [feintSelection, setFeintSelection]       = useState([]);
 
+  // ── Interactive stat-choice state ─────────────────────────────────────────
+  // pendingChoiceAction: ability waiting for the player to pick a stat
+  // null | { abilityName, abilityKey, options: [{label, onPick}] }
+  const [pendingChoiceAction, setPendingChoiceAction] = useState(null);
+
   // ── Log ────────────────────────────────────────────────────────────────────
   const COMBAT_LOG_CAP = 150;
   const addLog = (text, type='log-roll') =>
@@ -4306,9 +4319,21 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
   };
 
   // ── Life Spark / Dark Claw / Haunt double-check ───────────────────────────
+  // Glossary: "Every time you roll a double" — any matching pair in the set.
+  // With haste/lay of the land, hero can roll 3+ dice, so we must check all pairs,
+  // not just dice[0] === dice[1].
   const checkDoubles = (dice, currentHp, maxHp, foeId) => {
     let hp = currentHp;
-    if (dice.length >= 2 && dice[0] === dice[1]) {
+    // Detect any pair with the same value (sorted check is simplest)
+    const hasDoubles = (() => {
+      const seen = new Set();
+      for (const d of dice) {
+        if (seen.has(d)) return true;
+        seen.add(d);
+      }
+      return false;
+    })();
+    if (dice.length >= 2 && hasDoubles) {
       if (hasLifeSpark) {
         const healed = Math.min(4, maxHp - hp);
         if (healed > 0) { hp += healed; addLog(`✨ Life Spark: doubles! Heal ${healed} HP`, 'log-heal'); }
@@ -4359,8 +4384,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       darkPactActive:false, shadesActive: hasShades,
       sacrificeShadesActive:false, rainingBlowsActive:false,
       adrenalineRoundsLeft:0, timeShiftRoundsLeft:0,
-      foeDiceReduction:0, foeSpeedPenaltyThisRound:0,
-      foeBrawnPenaltyThisRound:0, foeMagicPenaltyThisRound:0, // Zapped! round-scoped penalties
+      foeDiceReduction:0, foeSpeedPenaltyThisRound:0, // global round penalty (Slam/NatRev carry)
       hauntActive:false, vampirismActive:false,
       lightningActive: hasLightning, retaliation1DieActive:false,
       retaliation2DiceActive:false, judgementActive:false, avengingActive:false,
@@ -4375,6 +4399,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     });
     const names = initFoes.map(f=>f.name).join(', ');
     setLog([{ text:`⚔ Combat begins: ${hero.name} vs ${names}`, type:'log-win' }]);
+    setPendingChoiceAction(null);
     setPhase(hasPreCombat ? 'precombat' : 'initiative');
     if (hasShades) addLog('🌑 Shades summoned — +2 per damage die.', 'log-passive');
   };
@@ -4387,17 +4412,20 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       const heroPath = hero.heroPath || hero.path;
       const dmgAttr  = heroPath==='mage' ? computed.magic : computed.brawn;
 
-      // Helper: auto-apply hero DoT passives when pre-combat damage causes health loss.
-      // FAQ Q9: "when you cause an opponent to lose health, they are immediately inflicted
-      // with the relevant passive abilities. They will not take damage until end of round 1."
+      // Helper: auto-apply hero DoT passives to the target foe when pre-combat
+      // damage causes health loss. FAQ Q9: DoT tick starts at end of round 1.
+      // Per-foe (heroDoTs), not global (heroPassives).
       const applyPreCombatDoTs = (dmgDealt) => {
         if (dmgDealt <= 0) return;
-        const newPassives = {};
-        if (hasVenom    && !heroPassives.venom)   { newPassives.venom   = true; addLog(`Venom applied to ${target.name}.`,'log-passive'); }
-        if (hasBleed    && !heroPassives.bleed)   { newPassives.bleed   = true; addLog(`Bleed applied to ${target.name}.`,'log-passive'); }
-        if (hasDisease  && !heroPassives.disease) { newPassives.disease = true; addLog(`Disease applied to ${target.name}.`,'log-passive'); }
-        if (hasToxicBlades && !heroPassives.bleed){ newPassives.bleed   = true; addLog(`Toxic Blades — Bleed applied to ${target.name}.`,'log-passive'); }
-        if (Object.keys(newPassives).length > 0) setHeroPassives(p=>({...p,...newPassives}));
+        setFoes(fs => fs.map(f => {
+          if (f.id !== target.id) return f;
+          const dots = { ...(f.heroDoTs || {}) };
+          if (hasVenom    && !dots.venom)   { dots.venom   = true; addLog(`Venom applied to ${target.name}.`,'log-passive'); }
+          if (hasBleed    && !dots.bleed)   { dots.bleed   = true; addLog(`Bleed applied to ${target.name}.`,'log-passive'); }
+          if (hasDisease  && !dots.disease) { dots.disease = true; addLog(`Disease applied to ${target.name}.`,'log-passive'); }
+          if (hasToxicBlades && !dots.bleed){ dots.bleed   = true; addLog(`Toxic Blades — Bleed applied to ${target.name}.`,'log-passive'); }
+          return { ...f, heroDoTs: dots };
+        }));
       };
 
       if (hasFirstStrike || hasBullsEye) {
@@ -4463,6 +4491,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     setPendingDiceAction(null);
     setSwapHeroDieIdx(null);
     setFeintSelection([]);
+    setPendingChoiceAction(null);
     setPhaseSnapshot(null);
     addLog('↩ Phase rewound — pick up where you left off.', 'log-passive');
   };
@@ -4479,7 +4508,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     // (that happens at start of next round). If they were set this round, apply them here.
     const extraFoePenalty = cmods.foeSpeedPenaltyThisRound + (cmods.slamSpeedPenalty||0) + (cmods.natRevSpeedPenalty||0);
     currentFoes.filter(f=>f.hp>0).forEach(f=>{
-      const fSpd=Math.max(0,(parseInt(f.speed)||0)-(f.speedPenalty||0)-extraFoePenalty);
+      const fSpd=Math.max(0,(parseInt(f.speed)||0)-(f.speedPenalty||0)-extraFoePenalty-(f.speedPenaltyThisRound||0));
       const fTotal=f.dice.reduce((a,b)=>a+b,0)+fSpd;
       if(fTotal>highestFoeTotal){highestFoeTotal=fTotal;leadFoe=f;}
     });
@@ -4494,6 +4523,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     takeSnapshot();
     setRolling(true);
     setPendingDiceAction(null);
+    setPendingChoiceAction(null);
     setSwapHeroDieIdx(null);
     setFeintSelection([]);
     setTimeout(() => {
@@ -4563,15 +4593,31 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
 
       let highestFoeTotal = 0;
       let leadFoe = null;
+      // Note: updatedFoesInit already had Shield Spin applied and cripple decremented.
+      // Per-foe speedPenaltyThisRound (from Zapped!) is read here and cleared on these foes.
       updatedFoesInit.filter(f=>f.hp>0).forEach(f => {
-        const fSpd = Math.max(0, (parseInt(f.speed)||0) - (f.speedPenalty||0) - cmods.foeSpeedPenaltyThisRound);
+        const fSpd = Math.max(0,
+          (parseInt(f.speed)||0)
+          - (f.speedPenalty||0)
+          - cmods.foeSpeedPenaltyThisRound   // global round penalty (Slam/NatRev carry)
+          - (f.speedPenaltyThisRound||0)     // per-foe round penalty (Zapped!)
+        );
         const fTotal = f.dice.reduce((a,b)=>a+b,0) + fSpd;
         addLog(`${f.name}: [${f.dice.join('][')}] +${fSpd}spd = ${fTotal}`, 'log-roll');
         if (fTotal > highestFoeTotal) { highestFoeTotal = fTotal; leadFoe = f; }
       });
+      // Clear per-foe round-scoped penalties now that this round's speed has been computed
+      setFoes(fs => fs.map(f => ({
+        ...f,
+        speedPenaltyThisRound: 0,
+        brawnPenaltyThisRound: 0,
+        magicPenaltyThisRound: 0,
+      })));
 
-      // Life Spark / Dark Claw check on hero dice
-      let newHeroHp = checkDoubles(hDiceFinal, heroHp, computed.maxHealth, null);
+      // Life Spark / Dark Claw check on hero initiative dice.
+      // Glossary: "every double you roll" — includes speed dice, not just damage.
+      // Dark Claw needs a target foe — use the active foe (the one the hero is fighting).
+      let newHeroHp = checkDoubles(hDiceFinal, heroHp, computed.maxHealth, activeFoeId);
       if (newHeroHp !== heroHp) setHeroHp(newHeroHp);
 
       // Swift Strikes: for each [6] in hero speed dice, deal weapon speed dmg to a foe
@@ -4634,8 +4680,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         brawnBonus: prev.bloodRageActive ? prev.brawnBonus : 0,
         foeDiceReduction: 0,
         foeSpeedPenaltyThisRound: 0,
-        foeBrawnPenaltyThisRound: 0,
-        foeMagicPenaltyThisRound: 0,
+        // foeBrawnPenaltyThisRound / foeMagicPenaltyThisRound removed — Zapped! now uses per-foe fields
         piercingActive: false,
         dodgeActive: false,
         windwalkerActive: false,
@@ -4834,14 +4879,15 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       setCmods(p=>({...p, foeSpeedPenaltyThisRound: p.foeSpeedPenaltyThisRound+1}));
       addLog(`${name}: foe -1 speed this round.`, 'log-roll');
     } else if (key.includes('zapped')) {
-      // Glossary: "speed, brawn and magic are lowered by 3 until the end of the combat round."
-      // Use round-scoped cmods (cleared in reset), NOT permanent per-foe speedPenalty/brawnPenalty/magicPenalty.
-      setCmods(p=>({...p,
-        foeSpeedPenaltyThisRound: p.foeSpeedPenaltyThisRound + 3,
-        foeBrawnPenaltyThisRound: p.foeBrawnPenaltyThisRound + 3,
-        foeMagicPenaltyThisRound: p.foeMagicPenaltyThisRound + 3,
-      }));
-      addLog(`${name}: foe -3 speed, brawn, magic this round only (cleared next round).`, 'log-roll');
+      // Glossary: "your opponent's speed, brawn and magic are lowered by 3" — targets ONE opponent.
+      // Store on the per-foe round-scoped fields, not global cmods (which leaked to ALL foes).
+      setFoes(fs => fs.map(f => f.id===activeFoeId ? {
+        ...f,
+        speedPenaltyThisRound: (f.speedPenaltyThisRound||0) + 3,
+        brawnPenaltyThisRound: (f.brawnPenaltyThisRound||0) + 3,
+        magicPenaltyThisRound: (f.magicPenaltyThisRound||0) + 3,
+      } : f));
+      addLog(`${name}: ${activeFoe?.name||'foe'} -3 speed, brawn, magic this round only.`, 'log-roll');
     } else if (key.includes('execution')) {
       const target = foes.find(f=>f.id===activeFoeId);
       // Glossary: "opponent whose health is equal to or lower than your speed" — effective speed (all bonuses)
@@ -4915,15 +4961,25 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     } else if (key.includes('ignite')) {
       const d1=rollD6(), d2=rollD6();
       const dmg = d1+d2+dieBonusNoScore;
-      setFoes(fs=>fs.map(f=>f.hp>0?{...f,hp:Math.max(0,f.hp-dmg),burned:true}:f));
+      // Apply damage AND per-foe DoTs to every live foe in one update
+      setFoes(fs=>fs.map(f=>{
+        if (f.hp <= 0) return f;
+        const updated = {...f, hp:Math.max(0,f.hp-dmg), burned:true};
+        if (dmg > 0) {
+          const dots = {...(f.heroDoTs||{})};
+          if (hasVenom    && !dots.venom)   { dots.venom   = true; }
+          if (hasBleed    && !dots.bleed)   { dots.bleed   = true; }
+          if (hasDisease  && !dots.disease) { dots.disease = true; }
+          if (hasToxicBlades && !dots.bleed){ dots.bleed   = true; }
+          updated.heroDoTs = dots;
+        }
+        return updated;
+      }));
       addLog(`🔥 Ignite: [${d1}]+[${d2}]${dieBonusNoScore?`+${dieBonusNoScore}shades`:''}=${dmg} to ALL foes (ignores armour). Burn applied!`, 'log-hit');
       if (dmg > 0) {
-        const newPassives = {};
-        if (hasVenom    && !heroPassives.venom)   { newPassives.venom   = true; addLog(`Venom applied to all foes (Ignite).`,'log-passive'); }
-        if (hasBleed    && !heroPassives.bleed)   { newPassives.bleed   = true; addLog(`Bleed applied to all foes (Ignite).`,'log-passive'); }
-        if (hasDisease  && !heroPassives.disease) { newPassives.disease = true; addLog(`Disease applied to all foes (Ignite).`,'log-passive'); }
-        if (hasToxicBlades && !heroPassives.bleed){ newPassives.bleed   = true; addLog(`Toxic Blades — Bleed applied to all foes (Ignite).`,'log-passive'); }
-        if (Object.keys(newPassives).length > 0) setHeroPassives(p=>({...p,...newPassives}));
+        if (hasVenom)     addLog(`Venom applied to all foes (Ignite).`,'log-passive');
+        if (hasBleed || hasToxicBlades) addLog(`Bleed applied to all foes (Ignite).`,'log-passive');
+        if (hasDisease)   addLog(`Disease applied to all foes (Ignite).`,'log-passive');
       }
       trackBloodRage(dmg);
       setPhase('post-damage');
@@ -4931,15 +4987,24 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       const d=rollD6();
       const dmg = d + dieBonusNoScore;
       const hitFoes = foes.filter(f=>f.hp>0);
-      setFoes(fs=>fs.map(f=>f.hp>0?{...f,hp:Math.max(0,f.hp-dmg)}:f));
+      setFoes(fs=>fs.map(f=>{
+        if (f.hp <= 0) return f;
+        const updated = {...f, hp:Math.max(0,f.hp-dmg)};
+        if (dmg > 0) {
+          const dots = {...(f.heroDoTs||{})};
+          if (hasVenom    && !dots.venom)   { dots.venom   = true; }
+          if (hasBleed    && !dots.bleed)   { dots.bleed   = true; }
+          if (hasDisease  && !dots.disease) { dots.disease = true; }
+          if (hasToxicBlades && !dots.bleed){ dots.bleed   = true; }
+          updated.heroDoTs = dots;
+        }
+        return updated;
+      }));
       addLog(`${name}: [${d}]${dieBonusNoScore?`+${dieBonusNoScore}shades`:''}=${dmg} dmg to ALL live foes (ignores armour)`, 'log-hit');
       if (dmg > 0 && hitFoes.length > 0) {
-        const newPassives = {};
-        if (hasVenom    && !heroPassives.venom)   { newPassives.venom   = true; addLog(`Venom applied to all foes.`,'log-passive'); }
-        if (hasBleed    && !heroPassives.bleed)   { newPassives.bleed   = true; addLog(`Bleed applied to all foes.`,'log-passive'); }
-        if (hasDisease  && !heroPassives.disease) { newPassives.disease = true; addLog(`Disease applied to all foes.`,'log-passive'); }
-        if (hasToxicBlades && !heroPassives.bleed){ newPassives.bleed   = true; }
-        if (Object.keys(newPassives).length > 0) setHeroPassives(p=>({...p,...newPassives}));
+        if (hasVenom)     addLog(`Venom applied to all foes.`,'log-passive');
+        if (hasBleed || hasToxicBlades) addLog(`Bleed applied to all foes.`,'log-passive');
+        if (hasDisease)   addLog(`Disease applied to all foes.`,'log-passive');
       }
       trackBloodRage(dmg);
       setPhase('post-damage');
@@ -5066,8 +5131,14 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-effectiveArmour)}:f));
       addLog(`${name}: ${effectiveArmour} (armour) dmg back to foe (ignores armour)`, 'log-hit');
     } else if (key.includes('corruption')) {
-      setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,brawnPenalty:(f.brawnPenalty||0)+2}:f));
-      addLog(`${name}: foe -2 brawn (permanent).`, 'log-passive');
+      // LoS/EoWF/Dune Corruption: reduce foe's brawn OR magic by 2 — player must choose
+      setPendingChoiceAction({
+        abilityName: name,
+        options: [
+          { label: 'Foe −2 Brawn', onPick: () => { setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,brawnPenalty:(f.brawnPenalty||0)+2}:f)); addLog(`${name}: foe −2 brawn (permanent).`, 'log-passive'); } },
+          { label: 'Foe −2 Magic', onPick: () => { setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,magicPenalty:(f.magicPenalty||0)+2}:f)); addLog(`${name}: foe −2 magic (permanent).`, 'log-passive'); } },
+        ],
+      });
     } else if (key.includes('rust')) {
       setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,armourPenalty:(f.armourPenalty||0)+2}:f));
       addLog(`${name}: foe -2 armour (permanent).`, 'log-passive');
@@ -5213,17 +5284,31 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       onHeroHealthChange(newHp);
       setCmods(p=>({...p, brawnBonus: p.brawnBonus+3}));
       addLog(`${name}: +10 HP (${heroHp}→${newHp}), +3 brawn this round.`, 'log-heal');
-    } else if (key.includes('fortitude')) {
-      // Glossary: "raise your brawn OR armour score by 3 for one combat round" — player chooses
-      // We apply brawn by default; player should manually adjust if choosing armour
-      setCmods(p=>({...p, brawnBonus: p.brawnBonus+3}));
-      addLog(`${name}: +3 brawn this round. (Glossary: choose brawn OR armour — tap armour buttons below to adjust if needed.)`, 'log-roll');
+    } else if (key.includes('fortitude') || key.includes('war paint')) {
+      // LoS Fortitude / HoF War paint: brawn OR armour +3 — player must choose
+      setPendingChoiceAction({
+        abilityName: name,
+        options: [
+          { label: '+3 Brawn', onPick: () => { setCmods(p=>({...p, brawnBonus: p.brawnBonus+3})); addLog(`${name}: +3 brawn this round.`, 'log-roll'); } },
+          { label: '+3 Armour', onPick: () => { setCmods(p=>({...p, armourBonus: p.armourBonus+3})); addLog(`${name}: +3 armour this round.`, 'log-roll'); } },
+        ],
+      });
     } else if (key.includes('focus')) {
       setCmods(p=>({...p, magicBonus: p.magicBonus+3}));
       addLog(`${name}: +3 magic this round.`, 'log-roll');
-    } else if (key.includes('vanquish') || key.includes('savagery')) {
+    } else if (key.includes('vanquish')) {
+      // Vanquish: brawn only (+2) — no choice
       setCmods(p=>({...p, brawnBonus: p.brawnBonus+2}));
       addLog(`${name}: +2 brawn this round.`, 'log-roll');
+    } else if (key.includes('savagery') || key.includes('heartless')) {
+      // LoS Savagery / HoF Heartless: brawn OR magic +2 — player must choose
+      setPendingChoiceAction({
+        abilityName: name,
+        options: [
+          { label: '+2 Brawn', onPick: () => { setCmods(p=>({...p, brawnBonus: p.brawnBonus+2})); addLog(`${name}: +2 brawn this round.`, 'log-roll'); } },
+          { label: '+2 Magic', onPick: () => { setCmods(p=>({...p, magicBonus: p.magicBonus+2})); addLog(`${name}: +2 magic this round.`, 'log-roll'); } },
+        ],
+      });
     } else if (key.includes('bright shield')) {
       setCmods(p=>({...p, armourBonus: p.armourBonus+4}));
       addLog(`${name}: +4 armour this round.`, 'log-roll');
@@ -5250,10 +5335,10 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         addLog(`${name}: already active this combat.`, 'log-passive');
       }
     } else if (key.includes('tourniquet') || key.includes('cauterise')) {
-      // These clear the hero's own venom/bleed/disease — personal cleanse only.
-      // They do NOT clear the per-foe DoT passives the player set on foe cards.
-      setHeroPassives(p=>({...p, venom:false, bleed:false, disease:false}));
-      addLog(`${name}: hero's Venom, Bleed and Disease cleared.`, 'log-heal');
+      // Clears the hero's own venom/bleed/disease passives — removes DoT ticking from all foes.
+      // Does NOT clear the per-foe passives the player set on foe cards (those are foe-inflicted).
+      setFoes(fs => fs.map(f => ({...f, heroDoTs:{venom:false,bleed:false,disease:false}})));
+      addLog(`${name}: hero's Venom, Bleed and Disease cleared — DoT ticking stopped on all foes.`, 'log-heal');
     } else if (key.includes('brain drain')) {
       const spend = Math.min(5, computed.magic + cmods.magicBonus);
       setCmods(p=>({...p, damageBonus: p.damageBonus+spend, magicBonus: p.magicBonus-spend}));
@@ -5275,12 +5360,17 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         // Refund the usedOnce slot — nothing was consumed
         setUsedOnce(prev => { const s=new Set(prev); s.delete('second wind'); return s; });
       }
-    } else if (key.includes('eureka')) {
-      // Glossary: "raise one of your attributes (speed, brawn, magic or armour) by 1 for one combat round"
-      // Player chooses which. Apply +1 to speed as default; log tells player to use
-      // the manual armour/brawn/magic buttons if they want a different stat.
-      setCmods(p=>({...p, speedBonus: p.speedBonus+1}));
-      addLog(`${name}: +1 speed this round. (Glossary: choose speed, brawn, magic OR armour — use the +/− stat buttons in the manual override panel if you want a different attribute.)`, 'log-roll');
+    } else if (key.includes('eureka') || key.includes('inner focus')) {
+      // LoS Eureka / Dune Sea Inner focus: speed, brawn, magic OR armour +1 — player must choose
+      setPendingChoiceAction({
+        abilityName: name,
+        options: [
+          { label: '+1 Speed',  onPick: () => { setCmods(p=>({...p, speedBonus: p.speedBonus+1})); addLog(`${name}: +1 speed this round.`, 'log-roll'); } },
+          { label: '+1 Brawn',  onPick: () => { setCmods(p=>({...p, brawnBonus: p.brawnBonus+1})); addLog(`${name}: +1 brawn this round.`, 'log-roll'); } },
+          { label: '+1 Magic',  onPick: () => { setCmods(p=>({...p, magicBonus: p.magicBonus+1})); addLog(`${name}: +1 magic this round.`, 'log-roll'); } },
+          { label: '+1 Armour', onPick: () => { setCmods(p=>({...p, armourBonus: p.armourBonus+1})); addLog(`${name}: +1 armour this round.`, 'log-roll'); } },
+        ],
+      });
     } else if (key.includes('watchful')) {
       // Interactive: player clicks a foe [6] to turn it [1]
       const activeFoeObj = foes.find(f=>f.id===activeFoeId);
@@ -5302,7 +5392,26 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         setUsedOnce(prev => { const s=new Set(prev); s.delete(key); return s; });
       }
     } else if (key.includes('steal')) {
-      addLog(`${name}: raise one of your attributes to match foe's — apply manually then undo after round.`, 'log-roll');
+      // LoS Steal: raise one of your stats to match foe's for this round — player chooses which
+      const foeObj = foes.find(f=>f.id===activeFoeId);
+      if (foeObj) {
+        const fSpd   = Math.max(0, (parseInt(foeObj.speed)||0)  - (foeObj.speedPenalty||0));
+        const fBrawn = Math.max(0, (parseInt(foeObj.brawn)||0)  - (foeObj.brawnPenalty||0));
+        const fMagic = Math.max(0, (parseInt(foeObj.magic)||0)  - (foeObj.magicPenalty||0));
+        const fArmour= Math.max(0, (parseInt(foeObj.armour)||0) - (foeObj.armourPenalty||0));
+        setPendingChoiceAction({
+          abilityName: name,
+          options: [
+            { label: `Speed → ${fSpd}`,   onPick: () => { const delta=Math.max(0,fSpd-(computed.speed+cmods.speedBonus));  setCmods(p=>({...p,speedBonus:p.speedBonus+delta}));   addLog(`${name}: speed raised to ${fSpd} (foe's speed) this round.`,'log-roll'); } },
+            { label: `Brawn → ${fBrawn}`,  onPick: () => { const delta=Math.max(0,fBrawn-(computed.brawn+cmods.brawnBonus));  setCmods(p=>({...p,brawnBonus:p.brawnBonus+delta}));   addLog(`${name}: brawn raised to ${fBrawn} (foe's brawn) this round.`,'log-roll'); } },
+            { label: `Magic → ${fMagic}`,  onPick: () => { const delta=Math.max(0,fMagic-(computed.magic+cmods.magicBonus));  setCmods(p=>({...p,magicBonus:p.magicBonus+delta}));   addLog(`${name}: magic raised to ${fMagic} (foe's magic) this round.`,'log-roll'); } },
+            { label: `Armour → ${fArmour}`,onPick: () => { const delta=Math.max(0,fArmour-(computed.armour+cmods.armourBonus));setCmods(p=>({...p,armourBonus:p.armourBonus+delta})); addLog(`${name}: armour raised to ${fArmour} (foe's armour) this round.`,'log-roll'); } },
+          ],
+        });
+      } else {
+        addLog(`${name}: no active foe to steal stats from.`, 'log-passive');
+        setUsedOnce(prev => { const s=new Set(prev); s.delete(key); return s; });
+      }
     } else if (key.includes('raining blows')) {
       // Passive toggle — each [6] on damage triggers an extra die. Stays active for the combat.
       setCmods(p=>({...p, rainingBlowsActive:true}));
@@ -5332,6 +5441,35 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     } else if (key === 'acid') {
       // Glossary v1.4: Acid (mo) — same rule as Sear. (pa in HoF/EoWF — handled by heroPassives fallback.)
       addLog(`${name}: active — +1 to each damage die (damage score rolls only) for the rest of combat.`, 'log-roll');
+    } else if (key.includes('wither')) {
+      // EoWF/HoF Wither: 2 dice + foe brawn OR magic -1 — roll damage separately, then choose stat
+      const d1=rollD6(), d2=rollD6();
+      const dmg = d1+d2+(2*dieBonusNoScore);
+      setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-dmg)}:f));
+      addLog(`${name}: [${d1}]+[${d2}]${dieBonusNoScore?`+${dieBonusNoScore*2}shades`:''}=${dmg} to ${activeFoe?.name} (ignores armour)`, 'log-hit');
+      trackBloodRage(dmg);
+      // Now ask which stat to reduce
+      setPendingChoiceAction({
+        abilityName: `${name} — reduce foe stat`,
+        options: [
+          { label: 'Foe −1 Brawn', onPick: () => { setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,brawnPenalty:(f.brawnPenalty||0)+1}:f)); addLog(`${name}: foe −1 brawn (permanent).`,'log-passive'); } },
+          { label: 'Foe −1 Magic', onPick: () => { setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,magicPenalty:(f.magicPenalty||0)+1}:f)); addLog(`${name}: foe −1 magic (permanent).`,'log-passive'); } },
+        ],
+      });
+      setPhase('post-damage');
+    } else if (key.includes('bless')) {
+      // HoF Bless: heal 6 HP and raise magic OR brawn by 1 for remainder of combat
+      const newHp = Math.min(computed.maxHealth, heroHp+6);
+      setHeroHp(newHp);
+      onHeroHealthChange(newHp);
+      addLog(`${name}: +6 HP (${heroHp}→${newHp}).`, 'log-heal');
+      setPendingChoiceAction({
+        abilityName: `${name} — raise stat (remainder of combat)`,
+        options: [
+          { label: '+1 Brawn (combat)', onPick: () => { setCmods(p=>({...p, brawnBonus: p.brawnBonus+1})); addLog(`${name}: +1 brawn for remainder of combat.`,'log-roll'); } },
+          { label: '+1 Magic (combat)', onPick: () => { setCmods(p=>({...p, magicBonus: p.magicBonus+1})); addLog(`${name}: +1 magic for remainder of combat.`,'log-roll'); } },
+        ],
+      });
     } else {
       addLog(`${name}: applied. (See ability description for manual effects.)`, 'log-roll');
     }
@@ -5365,11 +5503,14 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         // Apply die bonus per die (acid/sear/shades)
         const adjustedDice = finalDice.map(d => Math.min(12, d + dieBonusPerDie));
 
-        // Raining Blows: for each [6] roll bonus dice
+        // Raining Blows: for each [6] roll bonus dice (cascades).
+        // Safety cap at 20 bonus dice to prevent extreme chains with critical strike
+        // + all-6s that can theoretically loop for a long time.
         let extraFromRaining = [];
         if (cmods.rainingBlowsActive) {
           let checkDice = [...adjustedDice];
-          while (checkDice.some(d=>d>=6)) {
+          const MAX_RAINING = 20;
+          while (checkDice.some(d=>d>=6) && extraFromRaining.length < MAX_RAINING) {
             const bonus = checkDice.filter(d=>d>=6).map(()=>rollD6());
             extraFromRaining = [...extraFromRaining, ...bonus];
             checkDice = bonus;
@@ -5384,11 +5525,10 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         const diceSum = allDice.reduce((a,b)=>a+b,0);
 
         // Merciless: +1 per die if THE TARGET FOE has been inflicted with Bleed, Disease or Venom.
-        // Check the per-foe passive toggles (set by player when foe takes DoT) and hero's outgoing
-        // DoT flags (auto-set in applyDamage when hero deals health damage with Venom/Bleed/Disease).
+        // Check foe's passives (player-set) OR per-foe heroDoTs (auto-set when hero damages).
         const foeHasDoT = target && (
           target.passives?.bleed   || target.passives?.venom   || target.passives?.disease ||
-          heroPassives.bleed       || heroPassives.venom       || heroPassives.disease
+          target.heroDoTs?.bleed   || target.heroDoTs?.venom   || target.heroDoTs?.disease
         );
         const mercilessBonus = (hasMerciless && foeHasDoT) ? allDice.length : 0;
 
@@ -5408,7 +5548,8 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         // Life Spark / Dark Claw on damage doubles.
         // Forum 1021: Da Boss confirmed manipulated dice (dominate, critical strike) count.
         // Check finalDice (post-manipulation) not rawDice.
-        if (finalDice.length >= 2 && finalDice[0]===finalDice[1]) {
+        // Any pair within the dice set counts as doubles (not just dice[0]==dice[1]).
+        if (finalDice.length >= 2) {
           const newHp2 = checkDoubles(finalDice, heroHp, computed.maxHealth, target?.id);
           if (newHp2 !== heroHp) setHeroHp(newHp2);
         }
@@ -5416,8 +5557,8 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         // Foe rolls
         const foe = target;
         const foeDmgAttr = foe?.usesMagic
-          ? Math.max(0,(parseInt(foe.magic)||0)-(foe.magicPenalty||0)-cmods.foeMagicPenaltyThisRound)
-          : Math.max(0,(parseInt(foe.brawn)||0)-(foe.brawnPenalty||0)-cmods.foeBrawnPenaltyThisRound);
+          ? Math.max(0,(parseInt(foe.magic)||0)-(foe.magicPenalty||0)-(foe.magicPenaltyThisRound||0))
+          : Math.max(0,(parseInt(foe.brawn)||0)-(foe.brawnPenalty||0)-(foe.brawnPenaltyThisRound||0));
         const foeDmgDiceCount = Math.max(1, 1 + (foeDamageDiceOverride[foe?.id] || 0));
         const foeDiceRolls = Array.from({length: foeDmgDiceCount}, rollD6);
         // Second Sight: lower each die by 2 (minimum 1)
@@ -5468,22 +5609,22 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
 
     if (damageWinner === 'hero' && activeFoe) {
       const newHp = Math.max(0, activeFoe.hp - roundDamage);
-      setFoes(fs => fs.map(f => f.id===activeFoeId ? {...f, hp:newHp} : f));
-      addLog(`${activeFoe.name} HP: ${activeFoe.hp} → ${newHp}`, 'log-hit');
-
-      // Auto-apply DoT passives on first health damage dealt to this foe.
-      // Glossary: "if your damage score causes health damage, they continue to
-      // take damage at the end of each combat round." — flag only goes true here.
-      if (roundDamage > 0) {
-        const newPassives = {};
-        if (hasVenom      && !heroPassives.venom)   { newPassives.venom   = true; addLog(`Venom applied to ${activeFoe.name}.`, 'log-passive'); }
-        if (hasBleed      && !heroPassives.bleed)   { newPassives.bleed   = true; addLog(`Bleed applied to ${activeFoe.name}.`, 'log-passive'); }
-        if (hasDisease    && !heroPassives.disease) { newPassives.disease = true; addLog(`Disease applied to ${activeFoe.name}.`, 'log-passive'); }
-        if (hasToxicBlades && !heroPassives.bleed)  { newPassives.bleed   = true; addLog(`Toxic Blades — Bleed applied to ${activeFoe.name}.`, 'log-passive'); }
-        if (Object.keys(newPassives).length > 0) {
-          setHeroPassives(p => ({...p, ...newPassives}));
+      // Apply HP reduction AND per-foe DoT flags in a single update so the state doesn't race.
+      // Glossary: DoTs tick against the opponent you've damaged — NOT against every foe.
+      setFoes(fs => fs.map(f => {
+        if (f.id !== activeFoeId) return f;
+        const updated = { ...f, hp: newHp };
+        if (roundDamage > 0) {
+          const dots = { ...(f.heroDoTs || {}) };
+          if (hasVenom      && !dots.venom)   { dots.venom   = true; addLog(`Venom applied to ${f.name}.`, 'log-passive'); }
+          if (hasBleed      && !dots.bleed)   { dots.bleed   = true; addLog(`Bleed applied to ${f.name}.`, 'log-passive'); }
+          if (hasDisease    && !dots.disease) { dots.disease = true; addLog(`Disease applied to ${f.name}.`, 'log-passive'); }
+          if (hasToxicBlades && !dots.bleed)  { dots.bleed   = true; addLog(`Toxic Blades — Bleed applied to ${f.name}.`, 'log-passive'); }
+          updated.heroDoTs = dots;
         }
-      }
+        return updated;
+      }));
+      addLog(`${activeFoe.name} HP: ${activeFoe.hp} → ${newHp}`, 'log-hit');
 
       // Vampirism / Leech
       if (cmods.vampirismActive && roundDamage > 0) {
@@ -5525,7 +5666,8 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       // KickStart
       if (newHeroHp <= 0 && hasKickStart && !cmods.kickStartUsed) {
         newHeroHp = 15;
-        setHeroPassives(p=>({...p,venom:false,bleed:false,disease:false}));
+        // Clear per-foe DoTs on the active foe (KickStart removes all passive effects)
+        setFoes(fs => fs.map(f => f.id===activeFoeId ? {...f, heroDoTs:{venom:false,bleed:false,disease:false}} : f));
         setCmods(p=>({...p,kickStartUsed:true}));
         addLog(`⚡ Kick Start: brought back to life at 15 HP!`, 'log-heal');
       }
@@ -5556,28 +5698,30 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     setSwapHeroDieIdx(null);
     setFeintSelection([]);
     let newHeroHp = heroHp;
-    let thornDoTApply = false; // set true if thorns/barbs causes health damage this round
+    // Track which foe IDs were hit by thorns/barbs so we can apply heroDoTs per-foe afterward
+    const thornHitFoeIds = new Set();
     const updatedFoes = foes.map(f => {
       if (f.hp <= 0) return f;
       let hp = f.hp;
 
-      // Hero → foe DoT passives.
-      // These flags are auto-set in applyDamage the first time health damage is dealt.
-      // Once active they tick every round for remainder of combat (glossary: "for the
-      // remainder of the combat"). Player can also toggle manually on the passive bar.
-      if (heroPassives.venom)     { hp=Math.max(0,hp-venomDmg); addLog(`Venom: ${f.name} −${venomDmg}HP`,'log-passive'); }
-      if (heroPassives.bleed)     { hp=Math.max(0,hp-1);         addLog(`Bleed: ${f.name} −1HP`,'log-passive'); }
-      if (heroPassives.disease)   { hp=Math.max(0,hp-2);         addLog(`Disease: ${f.name} −2HP`,'log-passive'); }
+      // Hero → foe DoT passives (per-foe — only foes that have taken hero damage tick).
+      // Glossary: "If your damage score causes health damage to your opponent, THEY
+      // continue to take damage at the end of each combat round." — the opponent hit,
+      // not every foe in the encounter.
+      const fDoTs = f.heroDoTs || {};
+      if (fDoTs.venom)    { hp=Math.max(0,hp-venomDmg); addLog(`Venom: ${f.name} −${venomDmg}HP`,'log-passive'); }
+      if (fDoTs.bleed)    { hp=Math.max(0,hp-1);         addLog(`Bleed: ${f.name} −1HP`,'log-passive'); }
+      if (fDoTs.disease)  { hp=Math.max(0,hp-2);         addLog(`Disease: ${f.name} −2HP`,'log-passive'); }
 
-      // Unconditional hero passives — fire every round regardless of damage
+      // Unconditional hero passives — fire every round against ALL live foes regardless
+      // of damage. These are area-effect auras that don't need a prior health-damage trigger.
       if (heroPassives.thorns || heroPassives.barbs) {
         const hpBefore = hp;
         hp=Math.max(0,hp-1);
         addLog(`Thorns/Barbs: ${f.name} −1HP`,'log-passive');
-        // Forum 3551: "Yes, thorns would trigger other effects, such as bleed and venom,
-        // as opponents have taken health damage."
+        // Forum 3551: thorns damage counts as health damage → triggers venom/bleed/disease per-foe
         if (hp < hpBefore) {
-          thornDoTApply = true; // flag to enable DoTs after the map
+          thornHitFoeIds.add(f.id);
         }
       }
       if (heroPassives.fire_aura) { hp=Math.max(0,hp-1);         addLog(`Fire Aura: ${f.name} −1HP`,'log-passive'); }
@@ -5606,14 +5750,23 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       return { ...f, hp };
     });
 
-    // Thorns/Barbs triggered DoTs — apply if not already active
-    if (thornDoTApply) {
-      const newPassives = {};
-      if (hasVenom    && !heroPassives.venom)   { newPassives.venom   = true; addLog(`Venom applied (via Thorns/Barbs damage).`,'log-passive'); }
-      if (hasBleed    && !heroPassives.bleed)   { newPassives.bleed   = true; addLog(`Bleed applied (via Thorns/Barbs damage).`,'log-passive'); }
-      if (hasDisease  && !heroPassives.disease) { newPassives.disease = true; addLog(`Disease applied (via Thorns/Barbs damage).`,'log-passive'); }
-      if (hasToxicBlades && !heroPassives.bleed){ newPassives.bleed   = true; }
-      if (Object.keys(newPassives).length > 0) setHeroPassives(p=>({...p,...newPassives}));
+    // Thorns/Barbs triggered per-foe DoTs — apply to each foe that took thorns damage
+    // Forum 3551: "Yes, thorns would trigger other effects such as bleed and venom,
+    // as opponents have taken health damage." — uses per-foe heroDoTs now.
+    if (thornHitFoeIds.size > 0) {
+      const finalFoes = updatedFoes.map(f => {
+        if (!thornHitFoeIds.has(f.id)) return f;
+        const dots = {...(f.heroDoTs||{})};
+        let logged = false;
+        if (hasVenom    && !dots.venom)   { dots.venom   = true; if (!logged) { addLog(`Venom applied (via Thorns/Barbs).`,'log-passive'); logged=true; } }
+        if (hasBleed    && !dots.bleed)   { dots.bleed   = true; if (!logged) { addLog(`Bleed applied (via Thorns/Barbs).`,'log-passive'); logged=true; } }
+        if (hasDisease  && !dots.disease) { dots.disease = true; }
+        if (hasToxicBlades && !dots.bleed){ dots.bleed   = true; }
+        return {...f, heroDoTs: dots};
+      });
+      setFoes(finalFoes);
+    } else {
+      setFoes(updatedFoes);
     }
 
     // Meditation / Cleansing Light
@@ -5623,21 +5776,28 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     // KickStart on passive damage death
     if (newHeroHp <= 0 && hasKickStart && !cmods.kickStartUsed) {
       newHeroHp = 15;
+      // Clear per-foe DoTs on ALL foes (KickStart removes all passive effects on hero)
+      setFoes(fs => fs.map(f => ({...f, heroDoTs:{venom:false,bleed:false,disease:false}})));
       setCmods(p=>({...p,kickStartUsed:true}));
       addLog(`⚡ Kick Start: brought back to life at 15 HP!`,'log-heal');
     }
 
-    setFoes(updatedFoes);
+    // setFoes is called inside the thornHitFoeIds if/else above — don't call again here.
+    // Use the final foe array (with thorns DoTs merged in if applicable) for end-of-round checks.
+    const finalFoesForCheck = thornHitFoeIds.size > 0
+      ? updatedFoes.map(f => thornHitFoeIds.has(f.id) ? {...f, heroDoTs: {...(f.heroDoTs||{}), ...(hasVenom?{venom:true}:{}), ...(hasBleed||hasToxicBlades?{bleed:true}:{}), ...(hasDisease?{disease:true}:{})}} : f)
+      : updatedFoes;
+
     setHeroHp(newHeroHp);
     onHeroHealthChange(newHeroHp);
 
     // Da Boss ruling (forum 3315): "as soon as the last opponent is defeated the combat is
     // immediately over" — no further hero passive ticks after last foe dies.
-    const allDead = updatedFoes.every(f=>f.hp<=0);
+    const allDead = finalFoesForCheck.every(f=>f.hp<=0);
     if (allDead)        { endCombat('hero'); return; }
     if (newHeroHp <= 0) { endCombat('foe');  return; }
 
-    const foeSummary = updatedFoes.filter(f=>f.hp>0).map(f=>`${f.name}:${f.hp}HP`).join('  ');
+    const foeSummary = finalFoesForCheck.filter(f=>f.hp>0).map(f=>`${f.name}:${f.hp}HP`).join('  ');
     addLog(`End of round ${round}. ${hero.name}:${newHeroHp}HP  |  ${foeSummary}`,'log-roll');
     setHeroDice([]); setDamageDice([]);
     setWinner(null); setDamageWinner(null); setRoundDamage(null);
@@ -5929,6 +6089,32 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
             </div>
           ))}
         </div>
+        {/* ── Stat-choice picker — shown when an ability requires the player to choose a stat ── */}
+        {pendingChoiceAction && (
+          <div style={{marginTop:8,padding:'10px 12px',background:'rgba(212,160,23,0.07)',
+            border:'1px solid rgba(212,160,23,0.4)',borderRadius:1}}>
+            <div style={{fontFamily:'Cinzel,serif',fontSize:9,letterSpacing:2,
+              color:'var(--gold)',textTransform:'uppercase',marginBottom:8}}>
+              ⚜ {pendingChoiceAction.abilityName} — Choose:
+            </div>
+            <div style={{display:'flex',flexWrap:'wrap',gap:6}}>
+              {pendingChoiceAction.options.map((opt, i) => (
+                <button key={i}
+                  onClick={() => {
+                    opt.onPick();
+                    setPendingChoiceAction(null);
+                  }}
+                  style={{padding:'6px 14px',fontFamily:'Cinzel,serif',fontSize:11,
+                    letterSpacing:1,cursor:'pointer',borderRadius:1,
+                    background:'rgba(212,160,23,0.12)',
+                    border:'1px solid var(--gold)',color:'var(--gold-bright)',
+                    transition:'all 0.15s'}}>
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
         <div style={{display:'flex',gap:6,alignItems:'center',marginBottom:4}}>
           <span style={{fontFamily:'Cinzel,serif',fontSize:9,letterSpacing:2,color:'var(--parchment-dark)',textTransform:'uppercase'}}>HP</span>
           <span style={{fontFamily:'Cinzel Decorative,serif',fontSize:16,color:'var(--blood-bright)'}}>{heroHp}/{computed.maxHealth}</span>
@@ -6042,26 +6228,43 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
             )}
           </div>
         )}
-        {/* Passive toggles */}
+        {/* Passive toggles — area passives (apply to all foes every round regardless of hit) */}
         <div style={{marginTop:8}}>
           <span style={{fontFamily:'Cinzel,serif',fontSize:8,letterSpacing:2,color:'var(--parchment-dark)',
             textTransform:'uppercase',marginRight:6}}
-            title="Venom/Bleed/Disease auto-enable when you deal health damage. Tap to correct if needed.">
-            Your DoTs on foes (auto-applied):
+            title="Area passives that tick every round against ALL foes. Tap to toggle.">
+            Area Passives:
           </span>
           {[
-            ['bleed','bleed'],['venom',`venom(${venomDmg})`],['disease','disease'],
             ['thorns','thorns'],['fire_aura','fire aura'],['barbs','barbs'],['vitriol','vitriol'],
           ].map(([key,label])=>(
             <span key={key} className={`passive-tag ${heroPassives[key]?'active':'inactive'}`}
-              title={key==='venom'||key==='bleed'||key==='disease'
-                ? `Auto-applied when you deal health damage. Tap to toggle manually.`
-                : `Tap to toggle.`}
+              title="Tap to toggle — these tick against every foe every round."
               onClick={()=>setHeroPassives(p=>({...p,[key]:!p[key]}))}>
               {label}
             </span>
           ))}
         </div>
+        {/* Per-foe DoT status — venom/bleed/disease track individually per foe */}
+        {foes.filter(f=>f.hp>0).length > 0 && (
+          <div style={{marginTop:4,display:'flex',flexWrap:'wrap',gap:4,alignItems:'center'}}>
+            <span style={{fontFamily:'Cinzel,serif',fontSize:8,letterSpacing:2,color:'var(--parchment-dark)',
+              textTransform:'uppercase',marginRight:2}}>
+              DoTs on foes:
+            </span>
+            {foes.filter(f=>f.hp>0).map(f=>{
+              const dots = f.heroDoTs || {};
+              const active = [dots.venom&&`venom(${venomDmg})`, dots.bleed&&'bleed', dots.disease&&'disease'].filter(Boolean);
+              return (
+                <span key={f.id} style={{fontSize:10,fontFamily:'Crimson Text,serif',
+                  color: active.length>0 ? 'var(--gold)' : 'rgba(139,105,20,0.35)',
+                  fontStyle: active.length===0 ? 'italic' : 'normal'}}>
+                  {f.name||`Foe ${f.id}`}: {active.length>0 ? active.join(', ') : 'none'}
+                </span>
+              );
+            })}
+          </div>
+        )}
       </div>
 
       {/* Foe cards */}
@@ -6568,7 +6771,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
                             const foeArmour = Math.max(0,(parseInt(foeObj?.armour)||0)-(foeObj?.armourPenalty||0));
                             const diceSum = newDmgDice.reduce((a,b)=>a+b,0);
                             const hasMerc = hasAbil(allPassives,'merciless');
-                            const foeHasDoT = foeObj&&(foeObj.passives?.bleed||foeObj.passives?.venom||foeObj.passives?.disease||heroPassives.bleed||heroPassives.venom||heroPassives.disease);
+                            const foeHasDoT = foeObj&&(foeObj.passives?.bleed||foeObj.passives?.venom||foeObj.passives?.disease||foeObj.heroDoTs?.bleed||foeObj.heroDoTs?.venom||foeObj.heroDoTs?.disease);
                             const mercilessBonus = hasMerc&&foeHasDoT ? newDmgDice.length : 0;
                             const rawScore = diceSum+dmgAttr+cmods.damageBonus+mercilessBonus;
                             const newDmgDealt = cmods.piercingActive ? rawScore : Math.max(0, rawScore-foeArmour);
@@ -6752,7 +6955,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
                         const adjDice = nd.map(d => Math.min(12, d + dieBonusPerDie));
                         const adjSum = adjDice.reduce((a,b)=>a+b,0);
                         // Merciless bonus
-                        const foeDoT = target && (target.passives?.bleed||target.passives?.venom||target.passives?.disease||heroPassives.bleed||heroPassives.venom||heroPassives.disease);
+                        const foeDoT = target && (target.passives?.bleed||target.passives?.venom||target.passives?.disease||target.heroDoTs?.bleed||target.heroDoTs?.venom||target.heroDoTs?.disease);
                         const merci = (hasMerciless && foeDoT) ? adjDice.length : 0;
                         const raw=adjSum+dmgAttr+cmods.damageBonus+merci;
                         setRoundDamage(cmods.piercingActive?raw:Math.max(0,raw-foeArmour));
