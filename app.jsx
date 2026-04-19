@@ -4116,6 +4116,16 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
   // Phase rewind — snapshot taken at start of each phase transition
   const [phaseSnapshot, setPhaseSnapshot] = useState(null);
 
+  // ── Companion state ────────────────────────────────────────────────────────
+  // companionSetup: persists between combats (player's choice)
+  // companion: live combat object, null when no companion or setup='none'
+  const [companionSetup, setCompanionSetup] = useState('none');
+  // companionBaseStats: editable starting stats shown in setup UI
+  const [companionBaseStats, setCompanionBaseStats] = useState({ hp:15, brawn:3, magic:3, armour:2 });
+  const [companion, setCompanion] = useState(null);
+  // Winged Tormenter target — foeId chosen by player at combat start
+  const [wingedTormenterTarget, setWingedTormenterTarget] = useState(null);
+
 
 
   // Manual edit overlay in combat
@@ -4314,6 +4324,18 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
   const hasDisease       = hasAbil(allPassives,'disease');
   const hasToxicBlades   = hasAbil(allPassives,'toxic blades'); // Dune Sea — same DoT mechanic as bleed
 
+  // ── Companion ability flags ────────────────────────────────────────────────
+  const hasFarSight       = hasAbil(allPassives,'far sight');       // Dune: talon wing → auto-win round 1
+  const hasWingedTormenter= hasAbil(allPassives,'winged tormenter');// Dune: talon wing passive → 1 dmg/round
+  const hasLickWounds     = hasAbil(allPassives,'lick your wounds');// Dune: mastiff passive → +4 HP/round
+  const hasDeathFromAbove = hasAbil(allPassives,'death from above');// Dune: talon wing → d6 on foe when hero loses
+  const hasGuardian       = hasAbil(allPassives,'guardian');        // Dune: foe dmg to pet → 2 dmg back
+  const hasBrokenBond     = hasAbil(allPassives,'broken bond');     // Dune: mastiff dies → 1d+2 to foe
+  const hasVolatileLink   = hasAbil(allPassives,'volatile link');   // Dune: minion dies → 1d to all foes
+  const hasAstralManip    = hasAbil(allPassives,'astral manipulator');// Dune: passive minion untargetable
+  const hasBrokenTrust    = hasAbil(allPassives,'broken trust');    // HoF: gate on Blessed Bullets
+  const hasResurrection   = hasAbil(allModifier,'resurrection');    // Dune: revive minion once for 3 magic
+
   const venomDmg = 2 + (hasDeadlyPoisons ? 1 : 0) + (hasPoisonMastery ? 1 : 0);
 
   const seeingRedActive = hasSeeingRed && heroHp <= 20;
@@ -4495,6 +4517,25 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     const names = initFoes.map(f=>f.name).join(', ');
     setLog([{ text:`⚔ Combat begins: ${hero.name} vs ${names}`, type:'log-win' }]);
     setPendingChoiceAction(null);
+    // ── Companion init ─────────────────────────────────────────────────────
+    if (companionSetup !== 'none') {
+      const COMPANION_NAMES = { mastiff:'Mastiff', talon_wing:'Talon Wing', minion:'Minion', virgil:'Virgil' };
+      setCompanion({
+        type: companionSetup,
+        name: COMPANION_NAMES[companionSetup],
+        hp:     companionBaseStats.hp,
+        maxHp:  companionBaseStats.hp,
+        brawn:  companionBaseStats.brawn,
+        magic:  companionBaseStats.magic,
+        armour: companionBaseStats.armour,
+        stance: 'active',
+        alive: true,
+        resurrectionUsed: false,
+        defeatedFired: false,
+      });
+    } else {
+      setCompanion(null);
+    }
     setPhase(hasPreCombat ? 'precombat' : 'initiative');
     if (hasShades) addLog('🌑 Shades summoned — +2 per damage die.', 'log-passive');
   };
@@ -4564,6 +4605,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       usedOnce: new Set(usedOnce),
       usedThisRound: new Set(usedThisRound),
       cmods: {...cmods},
+      companion: companion ? {...companion} : null,
       // Dice override state — must be restored so rewind + re-roll uses same counts
       heroInitDiceDelta, heroDamageDiceDelta,
       foeDiceOverride: {...foeDiceOverride},
@@ -4593,12 +4635,38 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     if (s.heroDamageDiceDelta !== undefined) setHeroDamageDiceDelta(s.heroDamageDiceDelta);
     if (s.foeDiceOverride)        setFoeDiceOverride(s.foeDiceOverride);
     if (s.foeDamageDiceOverride)  setFoeDamageDiceOverride(s.foeDamageDiceOverride);
+    if (s.companion !== undefined) setCompanion(s.companion);
     setPendingDiceAction(null);
     setSwapHeroDieIdx(null);
     setFeintSelection([]);
     setPendingChoiceAction(null);
     setPhaseSnapshot(null);
     addLog('↩ Phase rewound — pick up where you left off.', 'log-passive');
+  };
+
+  // ── COMPANION: handle defeat (Broken Bond / Volatile Link / Resurrection prompt) ──
+  const handleCompanionDeath = () => {
+    setCompanion(c => {
+      if (!c || !c.alive || c.defeatedFired) return c;
+      addLog(`💀 ${c.name} has been defeated!`, 'log-hit');
+      if (hasBrokenBond && c.type === 'mastiff') {
+        const roll = rollD6(); const dmg = roll + 2;
+        const t = foes.find(f => f.id===activeFoeId && f.hp>0) || foes.find(f => f.hp>0);
+        if (t) {
+          setFoes(fs => fs.map(f => f.id===t.id ? {...f, hp: Math.max(0, f.hp-dmg)} : f));
+          addLog(`🐕 Broken Bond: [${roll}]+2=${dmg} dmg to ${t.name} (ignores armour).`, 'log-hit');
+        }
+      }
+      if (hasVolatileLink && c.type === 'minion') {
+        const roll = rollD6();
+        setFoes(fs => fs.map(f => f.hp>0 ? {...f, hp: Math.max(0, f.hp-roll)} : f));
+        addLog(`💥 Volatile Link: Minion explodes! [${roll}] dmg to all opponents (ignores armour).`, 'log-hit');
+      }
+      if (c.type === 'minion' && hasResurrection && !c.resurrectionUsed) {
+        addLog(`⚡ Resurrection available — click the ability button to spend 3 magic and revive.`, 'log-win');
+      }
+      return {...c, alive: false, hp: 0, defeatedFired: true};
+    });
   };
 
   // ── HELPER: recalculate round winner from current dice state ──────────────
@@ -4812,6 +4880,16 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       }
 
       let roundWinner;
+
+      // Far Sight (Dune pa): talon wing alive → auto-win initiative round 1
+      if (hasFarSight && newRound === 1 && companion?.type === 'talon_wing' && companion.alive) {
+        addLog(`🦅 Far Sight: Talon Wing grants initiative — you automatically win round 1!`, 'log-win');
+        setHeroDice(hDiceFinal);
+        setWinner('hero'); setPhase('post-roll'); setRolling(false);
+        setDamageDice([]); setDamageWinner(null); setRoundDamage(null);
+        return;
+      }
+
       if (hTotal > highestFoeTotal) {
         roundWinner = 'hero';
         addLog(`${hero.name} wins the round!`, 'log-win');
@@ -6710,6 +6788,52 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       // HoF aliases already handled by existing branches — catch any that slip through
       addLog(`${name}: applied (see alias).`,'log-roll');
 
+    // ── Companion abilities ────────────────────────────────────────────────
+    } else if (key === 'evocation') {
+      if (!companion || companion.type!=='minion' || !companion.alive)
+        { addLog(`Evocation: minion not in play.`,'log-passive'); setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;}); return; }
+      setCmods(p=>({...p, damageBonus: p.damageBonus + companion.magic}));
+      addLog(`🌀 Evocation: +${companion.magic} to damage score (minion magic).`,'log-hit');
+    } else if (key === 'energy boost') {
+      if (!companion || companion.type!=='minion' || !companion.alive)
+        { addLog(`Energy Boost: minion not in play.`,'log-passive'); setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;}); return; }
+      setCompanion(c => c ? {...c, armour: c.armour + 3} : c);
+      setCmods(p=>({...p, magicBonus: p.magicBonus - 2}));
+      addLog(`⚡ Energy Boost: Minion armour +3 (now ${companion.armour+3}). Your magic -2 this round.`,'log-passive');
+    } else if (key === 'pack spirit') {
+      if (!companion || companion.type!=='mastiff' || !companion.alive)
+        { addLog(`Pack Spirit: mastiff not in play.`,'log-passive'); return; }
+      setCompanion(c => c ? {...c, brawn: c.brawn + 1} : c);
+      addLog(`🐕 Pack Spirit: Mastiff brawn +1 → ${companion.brawn+1}. Spend one unused sp/co ability (mark it used manually).`,'log-passive');
+      return; // Pack Spirit has no once-per-combat limit — skip usedOnce guard
+    } else if (key === 'resurrection') {
+      if (!companion || companion.type!=='minion' || companion.alive || companion.resurrectionUsed)
+        { addLog(`Resurrection: minion must be defeated and ability not yet spent.`,'log-passive'); setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;}); return; }
+      setCmods(p=>({...p, magicBonus: p.magicBonus - 3}));
+      setCompanion(c => c ? {...c, alive:true, hp:companionBaseStats.hp, magic:companionBaseStats.magic,
+        armour:companionBaseStats.armour, defeatedFired:false, resurrectionUsed:true} : c);
+      addLog(`✨ Resurrection: Minion revived at base stats. Your magic -3 this round.`,'log-heal');
+    } else if (key === 'blessed bullets') {
+      if (!companion || companion.type!=='virgil' || !companion.alive) {
+        addLog(`Blessed Bullets: Virgil must be your companion and alive.`,'log-passive');
+        setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;}); return;
+      }
+      if (hasBrokenTrust) {
+        const btRoll = rollD6();
+        if (btRoll <= 5) {
+          addLog(`🎲 Broken Trust: [${btRoll}] — Blessed Bullets fail this round. Retry next round.`,'log-passive');
+          setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;}); return;
+        }
+        addLog(`🎲 Broken Trust: [${btRoll}] — success!`,'log-passive');
+      }
+      if (winner!=='hero'){addLog(`${name}: only usable when you win.`,'log-passive');setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;});return;}
+      const [bb1,bb2,bb3]=[rollD6(),rollD6(),rollD6()];
+      const bbDmg = bb1+bb2+bb3;
+      setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-bbDmg)}:f));
+      setCmods(p=>({...p, foeSpeedPenaltyThisRound:(p.foeSpeedPenaltyThisRound||0)+1}));
+      addLog(`🔫 ${name}: [${bb1}][${bb2}][${bb3}]=${bbDmg} dmg to ${activeFoe?.name} (ignores armour). Foe -1 speed next round.`,'log-hit');
+      trackBloodRage(bbDmg); setPhase('post-damage');
+
     } else {
       addLog(`${name}: applied. (See ability description for manual effects.)`, 'log-roll');
     }
@@ -6974,6 +7098,17 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         addLog(`⚡ Lightning: 2 dmg back to ${activeFoe?.name}`, 'log-hit');
       }
 
+      // Death from Above (Dune pa): talon wing alive → roll d6 on [5-6] deal brawn to attacker
+      if (hasDeathFromAbove && companion?.type === 'talon_wing' && companion.alive && roundDamage > 0) {
+        const dfaRoll = rollD6();
+        if (dfaRoll >= 5) {
+          setFoes(fs => fs.map(f => f.id===activeFoeId ? {...f, hp: Math.max(0, f.hp - companion.brawn)} : f));
+          addLog(`🦅 Death from Above: [${dfaRoll}] — Talon Wing strikes! ${companion.brawn} dmg to ${activeFoe?.name} (ignores armour).`, 'log-hit');
+        } else {
+          addLog(`🦅 Death from Above: [${dfaRoll}] — no strike (needs 5+).`, 'log-passive');
+        }
+      }
+
       setHeroHp(newHeroHp);
       onHeroHealthChange(newHeroHp); // persist to hero.baseAttributes.health so sheet stays in sync
       addLog(`${hero.name} HP: ${heroHp} → ${newHeroHp}`, 'log-hit');
@@ -7048,6 +7183,11 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         const smDmg = Math.floor(effectiveArmour / 4);
         if (smDmg > 0) { hp=Math.max(0,hp-smDmg); addLog(`Searing Mantle: ${f.name} −${smDmg}HP (${effectiveArmour} armour ÷ 4)`,'log-passive'); }
       }
+      // Winged Tormenter (Dune pa): talon wing passive → 1 dmg to chosen target, end of round
+      if (hasWingedTormenter && companion?.type==='talon_wing' && companion.alive && companion.stance==='passive') {
+        const wtId = wingedTormenterTarget || liveFoes()[0]?.id;
+        if (wtId && f.id === wtId) { hp=Math.max(0,hp-1); addLog(`🦅 Winged Tormenter: ${f.name} −1HP (ignores armour).`,'log-passive'); }
+      }
       // Armour Breaker (Dune pa): reduce one foe's armour by 1 at start of each round
       // Handled in rollInitiative for start-of-round trigger; here just for reference.
 
@@ -7090,6 +7230,15 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     // Meditation / Cleansing Light
     if (cmods.meditationActive) { newHeroHp=Math.min(computed.maxHealth,newHeroHp+1); addLog(`Meditation: ${hero.name} +1HP`,'log-heal'); }
     if (cmods.cleansLight)      { newHeroHp=Math.min(computed.maxHealth,newHeroHp+2); addLog(`Cleansing Light: ${hero.name} +2HP`,'log-heal'); }
+
+    // Lick Your Wounds (Dune pa): mastiff passive stance → restore 4 HP to mastiff at end of round
+    if (hasLickWounds && companion?.type==='mastiff' && companion.alive && companion.stance==='passive') {
+      const lwHealed = Math.min(companion.maxHp, companion.hp + 4);
+      if (lwHealed > companion.hp) {
+        setCompanion(c => c ? {...c, hp: lwHealed} : c);
+        addLog(`🐕 Lick Your Wounds: Mastiff +${lwHealed - companion.hp}HP (${lwHealed}/${companion.maxHp}).`, 'log-heal');
+      }
+    }
 
     // KickStart on passive damage death
     if (newHeroHp <= 0 && hasKickStart && !cmods.kickStartUsed) {
@@ -7361,6 +7510,126 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         </div>
       </div>
       </>
+    );
+  };
+
+  // ── COMPANION PANEL ────────────────────────────────────────────────────────
+  const renderCompanionPanel = () => {
+    if (!companion || phase==='setup' || phase==='ended') return null;
+    const icon = {mastiff:'🐕', talon_wing:'🦅', minion:'🌀', virgil:'🔫'}[companion.type] || '👤';
+    const hpPct = companion.maxHp > 0 ? Math.max(0, companion.hp / companion.maxHp * 100) : 0;
+    return (
+      <div className="panel" style={{marginBottom:8, opacity: companion.alive ? 1 : 0.55}}>
+        <div className="panel-header" style={{display:'flex',alignItems:'center',gap:6}}>
+          <span>{icon} {companion.name}</span>
+          <span style={{marginLeft:'auto',fontFamily:'Crimson Text,serif',fontSize:11,fontStyle:'italic',
+            color: companion.alive ? '#6dbf6d' : 'var(--blood-bright)'}}>
+            {companion.alive ? 'In play' : 'Defeated'}
+          </span>
+        </div>
+        <div className="panel-body" style={{paddingTop:8,paddingBottom:8}}>
+
+          {/* HP row */}
+          <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:6}}>
+            <span style={{fontFamily:'Cinzel,serif',fontSize:9,color:'var(--parchment-dark)',
+              letterSpacing:1,minWidth:18}}>HP</span>
+            <div style={{flex:1,height:8,background:'rgba(0,0,0,0.4)',
+              border:'1px solid rgba(90,74,32,0.3)',borderRadius:1,overflow:'hidden'}}>
+              <div style={{height:'100%',width:`${hpPct}%`,
+                background:'linear-gradient(90deg,#2d6a2d,#4a9e4a)',transition:'width 0.3s'}}/>
+            </div>
+            <span style={{fontFamily:'Cinzel Decorative,serif',fontSize:12,color:'#6dbf6d',
+              minWidth:46,textAlign:'right'}}>{companion.hp}/{companion.maxHp}</span>
+            <button onClick={()=>setCompanion(c=>c&&c.alive?{...c,hp:Math.max(0,c.hp-1)}:c)}
+              style={{width:22,height:22,cursor:'pointer',background:'rgba(139,26,26,0.15)',
+                border:'1px solid rgba(139,26,26,0.4)',color:'var(--blood-bright)',
+                fontFamily:'Cinzel,serif',fontSize:13,lineHeight:1,borderRadius:1}}>−</button>
+            <button onClick={()=>setCompanion(c=>c&&c.alive?{...c,hp:Math.min(c.maxHp,c.hp+1)}:c)}
+              style={{width:22,height:22,cursor:'pointer',background:'rgba(45,106,45,0.15)',
+                border:'1px solid rgba(74,158,74,0.4)',color:'#6dbf6d',
+                fontFamily:'Cinzel,serif',fontSize:13,lineHeight:1,borderRadius:1}}>+</button>
+          </div>
+
+          {/* Stats row */}
+          <div style={{display:'flex',gap:14,marginBottom:companion.type!=='virgil'?6:0,flexWrap:'wrap'}}>
+            {companion.type !== 'virgil' && (
+              <span style={{fontFamily:'Cinzel,serif',fontSize:9,color:'var(--parchment-dark)'}}>
+                BRAWN <span style={{color:'var(--parchment-light)',fontFamily:'Cinzel Decorative,serif',fontSize:11}}>{companion.brawn}</span>
+              </span>
+            )}
+            {companion.type === 'minion' && (<>
+              <span style={{fontFamily:'Cinzel,serif',fontSize:9,color:'var(--parchment-dark)'}}>
+                MAGIC <span style={{color:'var(--parchment-light)',fontFamily:'Cinzel Decorative,serif',fontSize:11}}>{companion.magic}</span>
+              </span>
+              <span style={{fontFamily:'Cinzel,serif',fontSize:9,color:'var(--parchment-dark)'}}>
+                ARMOUR <span style={{color:'var(--parchment-light)',fontFamily:'Cinzel Decorative,serif',fontSize:11}}>{companion.armour}</span>
+              </span>
+            </>)}
+          </div>
+
+          {/* Stance toggle — not for Virgil */}
+          {companion.type !== 'virgil' && companion.alive && (
+            <div style={{display:'flex',gap:6,alignItems:'center',marginBottom:4}}>
+              <span style={{fontFamily:'Cinzel,serif',fontSize:9,color:'var(--parchment-dark)',
+                letterSpacing:1,minWidth:44}}>STANCE</span>
+              {['active','passive'].map(s => (
+                <button key={s} onClick={()=>setCompanion(c=>c?{...c,stance:s}:c)}
+                  style={{padding:'3px 10px',fontFamily:'Cinzel,serif',fontSize:9,letterSpacing:1,
+                    cursor:'pointer',borderRadius:1,textTransform:'uppercase',
+                    background:companion.stance===s?'rgba(212,160,23,0.15)':'rgba(0,0,0,0.2)',
+                    border:`1px solid ${companion.stance===s?'var(--gold)':'rgba(90,74,32,0.35)'}`,
+                    color:companion.stance===s?'var(--gold)':'var(--parchment-dark)'}}>
+                  {s}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Winged Tormenter: target picker when talon wing is passive + ability present + multi-foe */}
+          {companion.type==='talon_wing' && hasWingedTormenter && companion.alive
+            && companion.stance==='passive' && foes.filter(f=>f.hp>0).length > 1 && (
+            <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:4,flexWrap:'wrap'}}>
+              <span style={{fontFamily:'Cinzel,serif',fontSize:9,color:'var(--parchment-dark)',
+                letterSpacing:1}}>🦅 TARGET</span>
+              {foes.filter(f=>f.hp>0).map(f=>(
+                <button key={f.id} onClick={()=>setWingedTormenterTarget(f.id)}
+                  style={{padding:'2px 8px',fontFamily:'Cinzel,serif',fontSize:9,cursor:'pointer',
+                    borderRadius:1,
+                    background:wingedTormenterTarget===f.id?'rgba(212,160,23,0.15)':'rgba(0,0,0,0.2)',
+                    border:`1px solid ${wingedTormenterTarget===f.id?'var(--gold)':'rgba(90,74,32,0.35)'}`,
+                    color:wingedTormenterTarget===f.id?'var(--gold)':'var(--parchment-dark)'}}>
+                  {f.name||`Foe ${f.id}`}
+                </button>
+              ))}
+            </div>
+          )}
+
+          {/* Passive reminders */}
+          {hasGuardian && companion.alive && companion.type !== 'virgil' && (
+            <div style={{fontFamily:'Crimson Text,serif',fontSize:11,color:'rgba(139,105,20,0.7)',
+              fontStyle:'italic',marginBottom:2}}>
+              ⚔ Guardian: if opponent targets {companion.name}, deal 2 dmg back (manual).
+            </div>
+          )}
+          {hasAstralManip && companion.type==='minion' && companion.alive && companion.stance==='passive' && (
+            <div style={{fontFamily:'Crimson Text,serif',fontSize:11,color:'rgba(139,105,20,0.7)',
+              fontStyle:'italic',marginBottom:2}}>
+              🌀 Astral Manipulator: passive-stance minion cannot be targeted by opponents.
+            </div>
+          )}
+
+          {/* Defeat button */}
+          {companion.alive && (
+            <button onClick={handleCompanionDeath}
+              style={{marginTop:4,padding:'3px 10px',fontFamily:'Cinzel,serif',fontSize:8,
+                letterSpacing:1,cursor:'pointer',borderRadius:1,textTransform:'uppercase',
+                background:'rgba(139,26,26,0.1)',border:'1px solid rgba(139,26,26,0.3)',
+                color:'rgba(192,57,43,0.7)'}}>
+              Mark Defeated
+            </button>
+          )}
+        </div>
+      </div>
     );
   };
 
@@ -8015,10 +8284,63 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         <div className="panel-body" style={{paddingTop:12}}>
 
           {phase==='setup'&&(
-            <button className="btn-roll" style={{width:'100%'}}
-              onClick={startCombat} disabled={!foes.some(f=>f.name.trim())}>
-              Begin Combat
-            </button>
+            <>
+              {/* ── Companion selector ── */}
+              <div style={{marginBottom:10}}>
+                <div style={{fontFamily:'Cinzel,serif',fontSize:9,letterSpacing:2,
+                  color:'var(--parchment-dark)',textTransform:'uppercase',marginBottom:5}}>
+                  Companion
+                </div>
+                <select value={companionSetup}
+                  onChange={e=>{
+                    const v = e.target.value;
+                    setCompanionSetup(v);
+                    const DEFAULTS = {
+                      mastiff:    {hp:15, brawn:3, magic:0, armour:2},
+                      talon_wing: {hp:10, brawn:2, magic:0, armour:1},
+                      minion:     {hp:10, brawn:0, magic:3, armour:3},
+                      virgil:     {hp:20, brawn:0, magic:0, armour:0},
+                    };
+                    if (v !== 'none') setCompanionBaseStats(DEFAULTS[v]);
+                  }}
+                  style={{width:'100%',background:'rgba(0,0,0,0.35)',
+                    border:'1px solid var(--slot-border)',color:'var(--parchment-light)',
+                    padding:'6px 10px',fontFamily:'Cinzel,serif',fontSize:10,letterSpacing:1,
+                    borderRadius:1,cursor:'pointer',marginBottom:4}}>
+                  <option value="none">None</option>
+                  <option value="mastiff">🐕 Mastiff (Dune Sea)</option>
+                  <option value="talon_wing">🦅 Talon Wing (Dune Sea)</option>
+                  <option value="minion">🌀 Minion (Dune Sea — Summoner)</option>
+                  <option value="virgil">🔫 Virgil (Halls of the Forge)</option>
+                </select>
+                {companionSetup !== 'none' && (
+                  <div style={{display:'flex',gap:8,flexWrap:'wrap',marginTop:4}}>
+                    {[
+                      {k:'hp',    label:'HP',     show: true},
+                      {k:'brawn', label:'Brawn',  show: companionSetup !== 'virgil'},
+                      {k:'magic', label:'Magic',  show: companionSetup === 'minion'},
+                      {k:'armour',label:'Armour', show: companionSetup === 'minion'},
+                    ].filter(f=>f.show).map(({k,label})=>(
+                      <div key={k} style={{display:'flex',flexDirection:'column',
+                        alignItems:'center',gap:2}}>
+                        <span style={{fontFamily:'Cinzel,serif',fontSize:8,
+                          color:'var(--parchment-dark)',letterSpacing:1}}>{label}</span>
+                        <input type="number" min={0} value={companionBaseStats[k]}
+                          onChange={e=>setCompanionBaseStats(p=>({...p,[k]:parseInt(e.target.value)||0}))}
+                          style={{width:46,textAlign:'center',background:'rgba(0,0,0,0.3)',
+                            border:'1px solid var(--slot-border)',color:'var(--parchment-light)',
+                            padding:'4px 0',fontFamily:'Cinzel Decorative,serif',fontSize:12,
+                            borderRadius:1,outline:'none'}}/>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+              <button className="btn-roll" style={{width:'100%'}}
+                onClick={startCombat} disabled={!foes.some(f=>f.name.trim())}>
+                Begin Combat
+              </button>
+            </>
           )}
 
           {phase==='precombat'&&(
@@ -8404,6 +8726,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       </div>
 
       {/* ── Backpack items — usable any time during combat ── */}
+      {renderCompanionPanel()}
       {renderBackpackPanel()}
 
       {/* Combat log */}
