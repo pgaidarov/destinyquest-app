@@ -4227,6 +4227,9 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     hookedDieSaved: 0,         // HoF Hooked: die value saved from previous round
     // windwalker: use heroDice sum as damage instead of 1d6
     windwalkerDiceSum: 0,
+    // Minor Mirage (Dune co): pending deflect — roll d6 when hero is hit, on [6] ignore damage
+    mirageActive: false,   // true = deflect pending for this round
+    mirageTarget: 'hero',  // 'hero' | 'minion'
   });
 
   // Pre-combat
@@ -4513,6 +4516,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       reclaimActive:false, reboundActive:false, hauntDmgThisRound:0,
       meditationActive:false, cleansLight: hasCleansLight,
       kickStartUsed:false, windwalkerDiceSum:0,
+      mirageActive:false, mirageTarget:'hero',
     });
     const names = initFoes.map(f=>f.name).join(', ');
     setLog([{ text:`⚔ Combat begins: ${hero.name} vs ${names}`, type:'log-win' }]);
@@ -4520,11 +4524,13 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     // ── Companion init ─────────────────────────────────────────────────────
     if (companionSetup !== 'none') {
       const COMPANION_NAMES = { mastiff:'Mastiff', talon_wing:'Talon Wing', minion:'Minion', virgil:'Virgil' };
+      // Volatile Link (Dune pa): minion gets +3 max health passively
+      const volatileLinkBonus = (companionSetup === 'minion' && hasVolatileLink) ? 3 : 0;
       setCompanion({
         type: companionSetup,
         name: COMPANION_NAMES[companionSetup],
-        hp:     companionBaseStats.hp,
-        maxHp:  companionBaseStats.hp,
+        hp:     companionBaseStats.hp + volatileLinkBonus,
+        maxHp:  companionBaseStats.hp + volatileLinkBonus,
         brawn:  companionBaseStats.brawn,
         magic:  companionBaseStats.magic,
         armour: companionBaseStats.armour,
@@ -4885,6 +4891,8 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       if (hasFarSight && newRound === 1 && companion?.type === 'talon_wing' && companion.alive) {
         addLog(`🦅 Far Sight: Talon Wing grants initiative — you automatically win round 1!`, 'log-win');
         setHeroDice(hDiceFinal);
+        // Set windwalkerDiceSum in case Windwalker is equipped (needs speed dice sum for damage)
+        setCmods(prev => ({...prev, windwalkerDiceSum: hDiceFinal.reduce((a,b)=>a+b,0)}));
         setWinner('hero'); setPhase('post-roll'); setRolling(false);
         setDamageDice([]); setDamageWinner(null); setRoundDamage(null);
         return;
@@ -4983,6 +4991,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         retaliation2DiceActive: false,
         judgementActive: false,
         avengingActive: false,
+        mirageActive: false,  // cleared each round — mirage is only valid for the round it was cast
         windwalkerDiceSum: hDiceFinal.reduce((a,b)=>a+b,0),
       });});
     }, 400);
@@ -6789,6 +6798,16 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       addLog(`${name}: applied (see alias).`,'log-roll');
 
     // ── Companion abilities ────────────────────────────────────────────────
+    } else if (key === 'minor mirage') {
+      if (winner !== 'hero') {
+        addLog(`Minor Mirage: only usable when you win (instead of rolling damage).`,'log-passive');
+        setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;}); return;
+      }
+      // Player can cast on themselves or on the minion if it's alive
+      const mt = (companion?.type==='minion' && companion.alive) ? 'minion' : 'hero';
+      setCmods(p=>({...p, magicBonus: p.magicBonus - 1, mirageActive: true, mirageTarget: mt}));
+      addLog(`🌫 Minor Mirage: cast on ${mt==='minion'?'Minion':'yourself'} (magic -1). If hit next round, roll d6 — on [6] attack ignored.`,'log-passive');
+      setPhase('post-damage');
     } else if (key === 'evocation') {
       if (!companion || companion.type!=='minion' || !companion.alive)
         { addLog(`Evocation: minion not in play.`,'log-passive'); setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;}); return; }
@@ -6830,7 +6849,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       const [bb1,bb2,bb3]=[rollD6(),rollD6(),rollD6()];
       const bbDmg = bb1+bb2+bb3;
       setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-bbDmg)}:f));
-      setCmods(p=>({...p, foeSpeedPenaltyThisRound:(p.foeSpeedPenaltyThisRound||0)+1}));
+      setCmods(p=>({...p, slamSpeedPenalty:(p.slamSpeedPenalty||0)+1}));
       addLog(`🔫 ${name}: [${bb1}][${bb2}][${bb3}]=${bbDmg} dmg to ${activeFoe?.name} (ignores armour). Foe -1 speed next round.`,'log-hit');
       trackBloodRage(bbDmg); setPhase('post-damage');
 
@@ -7059,7 +7078,42 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       }
 
     } else if (damageWinner === 'foe') {
+      // Death from Above (Dune pa): fires BEFORE opponent's damage (per rules).
+      // If DfA kills the foe the attack is cancelled — hero takes no damage.
+      if (hasDeathFromAbove && companion?.type === 'talon_wing' && companion.alive && roundDamage > 0) {
+        const dfaRoll = rollD6();
+        if (dfaRoll >= 5) {
+          const dfaNewHp = Math.max(0, (activeFoe?.hp ?? 0) - companion.brawn);
+          setFoes(fs => fs.map(f => f.id===activeFoeId ? {...f, hp: dfaNewHp} : f));
+          addLog(`🦅 Death from Above: [${dfaRoll}] — Talon Wing strikes first! ${companion.brawn} dmg to ${activeFoe?.name} (ignores armour).`, 'log-hit');
+          if (dfaNewHp <= 0) {
+            addLog(`${activeFoe?.name} slain by Death from Above — their attack is cancelled!`, 'log-win');
+            const remaining = foes.filter(f => f.id!==activeFoeId && f.hp>0);
+            if (remaining.length === 0) { endCombat('hero'); return; }
+            setActiveFoeId(remaining[0].id);
+            setPhase('passive'); return;
+          }
+        } else {
+          addLog(`🦅 Death from Above: [${dfaRoll}] — no strike (needs 5+).`, 'log-passive');
+        }
+      }
+
       let newHeroHp = Math.max(0, heroHp - roundDamage);
+
+      // Minor Mirage (Dune co): hero target → roll d6 on [6] ignore all incoming damage
+      if (cmods.mirageActive && cmods.mirageTarget === 'hero' && roundDamage > 0) {
+        const mirRoll = rollD6();
+        setCmods(p=>({...p, mirageActive: false}));
+        if (mirRoll === 6) {
+          addLog(`🌫 Minor Mirage: [${mirRoll}] — the attack passes through! No damage taken.`, 'log-win');
+          setPhase('passive'); return;
+        }
+        addLog(`🌫 Minor Mirage: [${mirRoll}] — mirage dispelled (needed 6).`, 'log-passive');
+      }
+      if (cmods.mirageActive && cmods.mirageTarget === 'minion') {
+        addLog(`🌫 Minor Mirage (Minion): roll d6 — on [6] ignore opponent's attack on your minion (manual).`, 'log-passive');
+        setCmods(p=>({...p, mirageActive: false}));
+      }
 
       // Blood Rage streak resets when the foe wins a round
       if (hasAbil(allModifier,'blood rage') && !cmods.bloodRageActive) {
@@ -7096,17 +7150,6 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       if (cmods.lightningActive && roundDamage > 0) {
         setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-2)}:f));
         addLog(`⚡ Lightning: 2 dmg back to ${activeFoe?.name}`, 'log-hit');
-      }
-
-      // Death from Above (Dune pa): talon wing alive → roll d6 on [5-6] deal brawn to attacker
-      if (hasDeathFromAbove && companion?.type === 'talon_wing' && companion.alive && roundDamage > 0) {
-        const dfaRoll = rollD6();
-        if (dfaRoll >= 5) {
-          setFoes(fs => fs.map(f => f.id===activeFoeId ? {...f, hp: Math.max(0, f.hp - companion.brawn)} : f));
-          addLog(`🦅 Death from Above: [${dfaRoll}] — Talon Wing strikes! ${companion.brawn} dmg to ${activeFoe?.name} (ignores armour).`, 'log-hit');
-        } else {
-          addLog(`🦅 Death from Above: [${dfaRoll}] — no strike (needs 5+).`, 'log-passive');
-        }
       }
 
       setHeroHp(newHeroHp);
