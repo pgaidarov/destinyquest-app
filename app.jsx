@@ -4157,7 +4157,10 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     brawnBonus: 0,          // from vanquish, savagery, blood rage, etc.
     extraSpeedDice: 0,      // haste, cat's speed, lay of the land
     extraDamageDice: 0,     // deep wound, feral fury, overload
-    piercingActive: false,  // ignore foe armour
+    piercingActive: false,  // ignore ALL foe armour (Piercing, Focused Strike)
+    fatalBlowActive: false, // ignore HALF foe armour rounded up (Fatal Blow)
+    // Per-combat hero stat adjustments (manual override panel) — survive round resets
+    heroStatAdj: { brawn:0, magic:0, speed:0, armour:0 },
     dodgeActive: false,     // sidestep/evade/vanish/spider sense/dodge/command
     windwalkerActive: false,// use speed dice as damage dice
     criticalStrikeActive: false, // set all damage dice to 6
@@ -4353,11 +4356,13 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     + (seeingRedActive ? 2 : 0)
     + bloodFrenzyBonus
     + cmods.speedBonus
-    + (cmods.reboundActive ? 2 : 0);
+    + (cmods.reboundActive ? 2 : 0)
+    + (cmods.heroStatAdj?.speed || 0);
 
   // Effective armour
   const effectiveArmour = computed.armour + cmods.armourBonus
-    + (cmods.shieldWallActive ? computed.armour : 0); // double if shield wall
+    + (cmods.shieldWallActive ? computed.armour : 0) // double if shield wall
+    + (cmods.heroStatAdj?.armour || 0);
 
   // Damage die bonus:
   // - searAcidBonus: only applies to a full damage SCORE roll (dice + brawn/magic).
@@ -4407,6 +4412,14 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
   };
   const liveFoes  = () => foes.filter(f => f.hp > 0);
   const activeFoe = foes.find(f => f.id === activeFoeId) || foes[0];
+
+  // Centralised armour calculation — respects Piercing (full bypass) and Fatal Blow (half, rounded up)
+  const calcFoeArmour = (foe) => {
+    const base = Math.max(0, (parseInt(foe?.armour)||0) - (foe?.armourPenalty||0) - (foe?.armourPenaltyThisRound||0));
+    if (cmods.piercingActive)  return 0;
+    if (cmods.fatalBlowActive) return Math.ceil(base / 2);
+    return base;
+  };
 
   // Toggle a foe ability as used/unused for this combat (sp/co/mo only — pa are permanent)
   const toggleFoeAbilityUsed = (foeId, abilityIndex) => {
@@ -4495,7 +4508,8 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     setCmods({
       speedBonus:0, armourBonus:0, damageBonus:0, magicBonus:0, brawnBonus:0,
       extraSpeedDice:0, extraDamageDice:0,
-      piercingActive:false, dodgeActive:false, windwalkerActive:false,
+      piercingActive:false, fatalBlowActive:false, dodgeActive:false, windwalkerActive:false,
+      heroStatAdj: { brawn:0, magic:0, speed:0, armour:0 },
       criticalStrikeActive:false, gutRipperActive:false, dominateActive:false,
       rakeActive:false, cleaveActive:false, blackRainActive:false, backfireActive:false,
       brutality2DiceActive:false, deflectActive:false, overpowerActive:false,
@@ -4612,6 +4626,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       usedThisRound: new Set(usedThisRound),
       cmods: {...cmods},
       companion: companion ? {...companion} : null,
+      heroStatAdj: cmods.heroStatAdj ? {...cmods.heroStatAdj} : {brawn:0,magic:0,speed:0,armour:0},
       // Dice override state — must be restored so rewind + re-roll uses same counts
       heroInitDiceDelta, heroDamageDiceDelta,
       foeDiceOverride: {...foeDiceOverride},
@@ -4642,6 +4657,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     if (s.foeDiceOverride)        setFoeDiceOverride(s.foeDiceOverride);
     if (s.foeDamageDiceOverride)  setFoeDamageDiceOverride(s.foeDamageDiceOverride);
     if (s.companion !== undefined) setCompanion(s.companion);
+    if (s.heroStatAdj) setCmods(prev => ({...prev, heroStatAdj: s.heroStatAdj}));
     setPendingDiceAction(null);
     setSwapHeroDieIdx(null);
     setFeintSelection([]);
@@ -4712,7 +4728,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
 
       // Tick down carry-over speed penalties
       const carrySpeedPenalty = cmods.poundSpeedPenalty + cmods.surgeSpeedPenalty + cmods.impaleSpeedPenalty;
-      const baseSpeedThisRound = computed.speed + (seeingRedActive ? 2 : 0) + bloodFrenzyBonus + cmods.speedBonus + (cmods.reboundActive ? 2 : 0);
+      const baseSpeedThisRound = computed.speed + (seeingRedActive ? 2 : 0) + bloodFrenzyBonus + cmods.speedBonus + (cmods.reboundActive ? 2 : 0) + (cmods.heroStatAdj?.speed || 0);
       const nextSpeed = Math.max(0, baseSpeedThisRound - carrySpeedPenalty);
 
       // Extra speed dice from abilities + manual override (heroInitDiceDelta)
@@ -4939,6 +4955,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         foeSpeedPenaltyThisRound: 0,
         // foeBrawnPenaltyThisRound / foeMagicPenaltyThisRound removed — Zapped! now uses per-foe fields
         piercingActive: false,
+        fatalBlowActive: false,
         dodgeActive: false,
         windwalkerActive: false,
         criticalStrikeActive: false,
@@ -4972,6 +4989,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         magicTapActive: false,               // per-round (restored on doubles)
         mangleHoFActive: prev.mangleHoFActive,     // persistent once activated
         soulBurstUsed: prev.soulBurstUsed,         // persistent
+        heroStatAdj: prev.heroStatAdj,             // persistent — only reset at combat start
         hookedDieSaved: 0,                         // consumed: die was added to speedBonus already
         // rainingBlowsActive intentionally NOT reset — persists for full combat once activated
         poundSpeedPenalty: 0,
@@ -5239,8 +5257,20 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       setCmods(p=>({...p, dodgeActive:true}));
       addLog(`${name}: damage avoided this round (passives still apply).`, 'log-passive');
     } else if (key.includes('piercing') || key.includes('fatal blow') || key.includes('focused strike')) {
-      setCmods(p=>({...p, piercingActive:true, extraDamageDice: p.extraDamageDice + (hasHeartSteal ? 1 : 0)}));
-      addLog(`${name}: next damage ignores foe armour${hasHeartSteal?' +1 die (Heart Steal)':''}.`, 'log-roll');
+      const isFatalBlow  = key.includes('fatal blow');
+      const isFullPierce = !isFatalBlow; // piercing + focused strike = full armour bypass
+      // Heart Steal (EoWF pa): only triggers on 'piercing' specifically, not Fatal Blow or Focused Strike
+      const heartStealDie = hasHeartSteal && key.includes('piercing') ? 1 : 0;
+      setCmods(p => ({
+        ...p,
+        piercingActive:  isFullPierce,
+        fatalBlowActive: isFatalBlow,
+        extraDamageDice: p.extraDamageDice + heartStealDie,
+      }));
+      const armourNote = isFatalBlow
+        ? 'next damage ignores half foe armour (rounded up)'
+        : `next damage ignores foe armour${heartStealDie ? ' +1 die (Heart Steal)' : ''}`;
+      addLog(`${name}: ${armourNote}.`, 'log-roll');
     } else if (key.includes('deep wound') || key.includes('feral fury') || key.includes('overload') || key.includes('heavy blow')) {
       const extra = 1 + (hasHeartSteal && (key.includes('deep wound') || key.includes('heavy blow')) ? 1 : 0);
       setCmods(p=>({...p, extraDamageDice: p.extraDamageDice + extra}));
@@ -6486,8 +6516,8 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         // Recalculate roundDamage
         const target=foes.find(f=>f.id===activeFoeId);
         const heroPath=hero.heroPath||hero.path; const isMage=heroPath==='mage';
-        const dmgAttr=isMage?(computed.magic+cmods.magicBonus):(computed.brawn+cmods.brawnBonus);
-        const foeArm=cmods.piercingActive?0:Math.max(0,(parseInt(target?.armour)||0)-(target?.armourPenalty||0));
+        const dmgAttr=isMage?(computed.magic+cmods.magicBonus+(cmods.heroStatAdj?.magic||0)):(computed.brawn+cmods.brawnBonus+(cmods.heroStatAdj?.brawn||0));
+        const foeArm=calcFoeArmour(target);
         const rawScore=newDmgDice.reduce((a,b)=>a+b,0)+dmgAttr+cmods.damageBonus;
         setRoundDamage(Math.max(0,rawScore-foeArm));
         addLog(`${name}: [6] on damage — extra die [${d}]. New damage recalculated.`,'log-roll');
@@ -6670,10 +6700,6 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-dmg)}:f));
       addLog(`${name}: [${d1}]+[${d2}]+${mhBrawn+lhBrawn}(wpn brawn)${dieBonusNoScore?`+${2*dieBonusNoScore}sh`:''}=${dmg} to ${activeFoe?.name} (ignores armour).`,'log-hit');
       trackBloodRage(dmg); setPhase('post-damage');
-    } else if (key.includes('focused strike')) {
-      // HoF (co): requires fists — = piercing
-      setCmods(p=>({...p,piercingActive:true}));
-      addLog(`${name}: ignores foe armour this damage roll.`,'log-roll');
     } else if (key.includes('ley line infusion')) {
       // HoF (co): roll die → various effects
       if(winner!=='hero'){addLog(`${name}: only usable when you win.`,'log-passive');setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;});return;}
@@ -6730,9 +6756,9 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       if(winner!=='hero'){addLog(`${name}: only usable when you win.`,'log-passive');setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;});return;}
       const heroPath=hero.heroPath||hero.path; const isMage=heroPath==='mage';
       const speedTotal=heroDice.reduce((a,b)=>a+b,0);
-      const dmgAttr=isMage?(computed.magic+cmods.magicBonus):(computed.brawn+cmods.brawnBonus);
+      const dmgAttr=isMage?(computed.magic+cmods.magicBonus+(cmods.heroStatAdj?.magic||0)):(computed.brawn+cmods.brawnBonus+(cmods.heroStatAdj?.brawn||0));
       const target=foes.find(f=>f.id===activeFoeId);
-      const foeArm=cmods.piercingActive?0:Math.max(0,(parseInt(target?.armour)||0)-(target?.armourPenalty||0));
+      const foeArm=calcFoeArmour(target);
       const rawScore=speedTotal+dmgAttr+cmods.damageBonus;
       const dmgDealt=Math.max(0,rawScore-foeArm);
       setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-dmgDealt)}:f));
@@ -6902,8 +6928,8 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         const allDice = [...adjustedDice, ...extraFromRaining];
 
         const dmgAttr = isMage
-          ? (computed.magic + cmods.magicBonus)
-          : (computed.brawn + cmods.brawnBonus);
+          ? (computed.magic + cmods.magicBonus + (cmods.heroStatAdj?.magic || 0))
+          : (computed.brawn + cmods.brawnBonus + (cmods.heroStatAdj?.brawn || 0));
         const dmgAttrName = isMage ? 'magic' : 'brawn';
         const diceSum = allDice.reduce((a,b)=>a+b,0);
 
@@ -6923,20 +6949,23 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         const spiritMarkBonus = target?.spiritMarked ? 2 : 0;
 
         const rawScore = diceSum + dmgAttr + cmods.damageBonus + mercilessBonus + mangleBonus + bladeFinesseBonus + spiritMarkBonus;
-        const foeArmour = Math.max(0, (parseInt(target?.armour)||0) - (target?.armourPenalty||0) - (target?.armourPenaltyThisRound||0));
-        const dmgDealt = cmods.piercingActive ? rawScore : Math.max(0, rawScore - foeArmour);
+        const foeArmour = calcFoeArmour(target);
+        const dmgDealt = Math.max(0, rawScore - foeArmour);
 
         setDamageDice(allDice);
         setDamageWinner('hero');
         setRoundDamage(dmgDealt);
 
-        const pierceNote  = cmods.piercingActive ? ' (piercing — ignores armour)' : ``;
-        const mercilessNote = mercilessBonus    ? ` +${mercilessBonus}(merciless)` : '';
+        const pierceNote  = cmods.piercingActive ? ' (piercing — ignores armour)'
+                          : cmods.fatalBlowActive ? ` (fatal blow — ${foeArmour} armour remaining)`
+                          : ``;
+        const acidNote    = dieBonusPerDie > 0 ? ` +${dieBonusPerDie}/die(acid/sear/bonus)` : '';
+        const mercilessNote = mercilessBonus  ? ` +${mercilessBonus}(merciless)` : '';
         const extraNote   = extraFromRaining.length ? ` +raining blows[${extraFromRaining.join('][')}]` : '';
-        const mangleNote  = mangleBonus         ? ` +${mangleBonus}(mangle)`        : '';
-        const finesseNote = bladeFinesseBonus   ? ` +${bladeFinesseBonus}(finesse)`  : '';
-        const markNote    = spiritMarkBonus     ? ` +${spiritMarkBonus}(mark)`       : '';
-        addLog(`${hero.name}: [${rawDice.join('][')}]${extraNote}+${dmgAttr}${dmgAttrName}+${cmods.damageBonus}bonus${mercilessNote}${mangleNote}${finesseNote}${markNote} = ${rawScore}${pierceNote} vs ${foeArmour}arm → ${dmgDealt}dmg to ${target?.name}`, 'log-hit');
+        const mangleNote  = mangleBonus       ? ` +${mangleBonus}(mangle)`        : '';
+        const finesseNote = bladeFinesseBonus ? ` +${bladeFinesseBonus}(finesse)`  : '';
+        const markNote    = spiritMarkBonus   ? ` +${spiritMarkBonus}(mark)`       : '';
+        addLog(`${hero.name}: [${rawDice.join('][')}]${acidNote}${extraNote}+${dmgAttr}${dmgAttrName}+${cmods.damageBonus}bonus${mercilessNote}${mangleNote}${finesseNote}${markNote} = ${rawScore}${pierceNote} vs ${foeArmour}arm → ${dmgDealt}dmg to ${target?.name}`, 'log-hit');
 
         // Blood Thief (HoF mo): for each [6] on damage dice, restore 4 health
         if (cmods.bloodThiefActive && allDice.some(d=>d>=6)) {
@@ -8541,15 +8570,15 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
                             }
                             const heroPath = hero.heroPath||hero.path;
                             const isMage = heroPath==='mage';
-                            const dmgAttr = isMage?(computed.magic+cmods.magicBonus):(computed.brawn+cmods.brawnBonus);
+                            const dmgAttr = isMage?(computed.magic+cmods.magicBonus+(cmods.heroStatAdj?.magic||0)):(computed.brawn+cmods.brawnBonus+(cmods.heroStatAdj?.brawn||0));
                             const foeObj  = foes.find(f=>f.id===activeFoeId)||liveFoes()[0];
-                            const foeArmour = Math.max(0,(parseInt(foeObj?.armour)||0)-(foeObj?.armourPenalty||0)-(foeObj?.armourPenaltyThisRound||0));
+                            const foeArmour = calcFoeArmour(foeObj);
                             const diceSum = newDmgDice.reduce((a,b)=>a+b,0);
                             const hasMerc = hasAbil(allPassives,'merciless');
                             const foeHasDoT = foeObj&&(foeObj.passives?.bleed||foeObj.passives?.venom||foeObj.passives?.disease||foeObj.heroDoTs?.bleed||foeObj.heroDoTs?.venom||foeObj.heroDoTs?.disease);
                             const mercilessBonus = hasMerc&&foeHasDoT ? newDmgDice.length : 0;
                             const rawScore = diceSum+dmgAttr+cmods.damageBonus+mercilessBonus;
-                            const newDmgDealt = cmods.piercingActive ? rawScore : Math.max(0, rawScore-foeArmour);
+                            const newDmgDealt = Math.max(0, rawScore-foeArmour);
                             setDamageDice(newDmgDice);
                             setRoundDamage(newDmgDealt);
                             addLog(`${logMsg} — new damage: ${newDmgDealt}`, 'log-roll');
@@ -8674,92 +8703,106 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
               <div style={{fontFamily:'Cinzel,serif',fontSize:9,letterSpacing:2,color:'var(--gold)',
                 textTransform:'uppercase',marginBottom:10}}>Manual Override</div>
 
-              {/* Hero HP edit */}
-              <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
-                <span style={{fontFamily:'Cinzel,serif',fontSize:10,color:'var(--parchment-dark)',
-                  minWidth:80}}>{hero.name} HP</span>
-                <input type="number" min={0} max={computed.maxHealth}
-                  value={heroHp}
-                  onChange={e=>{
-                    const v=Math.max(0,Math.min(computed.maxHealth,parseInt(e.target.value)||0));
-                    setHeroHp(v); onHeroHealthChange(v);
-                  }}
-                  style={{width:70,background:'rgba(0,0,0,0.4)',border:'1px solid var(--slot-border)',
-                    color:'var(--blood-bright)',padding:'4px 8px',fontFamily:'Cinzel,serif',
+              {/* ── Hero stats ── */}
+              <div style={{fontFamily:'Cinzel,serif',fontSize:8,letterSpacing:2,
+                color:'var(--gold)',textTransform:'uppercase',marginBottom:6}}>{hero.name}</div>
+
+              {/* Hero HP */}
+              <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:6}}>
+                <span style={{fontFamily:'Cinzel,serif',fontSize:9,color:'var(--parchment-dark)',
+                  minWidth:52,letterSpacing:1}}>HP</span>
+                <input type="number" min={0} max={computed.maxHealth} value={heroHp}
+                  onChange={e=>{const v=Math.max(0,Math.min(computed.maxHealth,parseInt(e.target.value)||0));setHeroHp(v);onHeroHealthChange(v);}}
+                  style={{width:60,background:'rgba(0,0,0,0.4)',border:'1px solid var(--slot-border)',
+                    color:'var(--blood-bright)',padding:'4px 6px',fontFamily:'Cinzel,serif',
                     fontSize:13,outline:'none',borderRadius:1,textAlign:'center'}}/>
                 <span style={{fontSize:11,color:'rgba(139,105,20,0.5)'}}>/ {computed.maxHealth}</span>
               </div>
 
-              {/* Foe HP edits */}
+              {/* Hero stat ± buttons */}
+              {[
+                {k:'brawn',  label:'Brawn',  base:computed.brawn,  color:'#c0392b'},
+                {k:'magic',  label:'Magic',  base:computed.magic,  color:'#4a9eff'},
+                {k:'speed',  label:'Speed',  base:computed.speed,  color:'var(--gold)'},
+                {k:'armour', label:'Armour', base:computed.armour, color:'#6dbf6d'},
+              ].map(({k,label,base,color})=>{
+                const adj=cmods.heroStatAdj?.[k]||0;
+                return (
+                  <div key={k} style={{display:'flex',alignItems:'center',gap:6,marginBottom:5}}>
+                    <span style={{fontFamily:'Cinzel,serif',fontSize:9,color:'var(--parchment-dark)',minWidth:52,letterSpacing:1}}>{label}</span>
+                    <button onClick={()=>setCmods(p=>({...p,heroStatAdj:{...(p.heroStatAdj||{}), [k]:(p.heroStatAdj?.[k]||0)-1}}))}
+                      style={{width:22,height:22,cursor:'pointer',background:'rgba(139,26,26,0.15)',border:'1px solid rgba(139,26,26,0.4)',color:'var(--blood-bright)',fontFamily:'Cinzel,serif',fontSize:13,lineHeight:1,borderRadius:1}}>−</button>
+                    <span style={{fontFamily:'Cinzel Decorative,serif',fontSize:13,minWidth:28,textAlign:'center',color:adj!==0?color:'var(--parchment-dark)'}}>
+                      {base+adj}
+                    </span>
+                    <button onClick={()=>setCmods(p=>({...p,heroStatAdj:{...(p.heroStatAdj||{}), [k]:(p.heroStatAdj?.[k]||0)+1}}))}
+                      style={{width:22,height:22,cursor:'pointer',background:'rgba(45,106,45,0.15)',border:'1px solid rgba(74,158,74,0.4)',color:'#6dbf6d',fontFamily:'Cinzel,serif',fontSize:13,lineHeight:1,borderRadius:1}}>+</button>
+                    {adj!==0&&(<span style={{fontFamily:'Crimson Text,serif',fontSize:11,color:adj>0?'#6dbf6d':'var(--blood-bright)',fontStyle:'italic'}}>{adj>0?`+${adj}`:adj}</span>)}
+                    {adj!==0&&(<button onClick={()=>setCmods(p=>({...p,heroStatAdj:{...(p.heroStatAdj||{}),[k]:0}}))}
+                      style={{padding:'1px 5px',fontFamily:'Cinzel,serif',fontSize:8,cursor:'pointer',background:'rgba(0,0,0,0.2)',border:'1px solid rgba(90,74,32,0.3)',color:'var(--parchment-dark)',borderRadius:1}}>↺</button>)}
+                  </div>
+                );
+              })}
+
+              {/* ── Foe stats ── */}
               {foes.map(f=>(
-                <div key={f.id} style={{display:'flex',alignItems:'center',gap:8,marginBottom:8}}>
-                  <span style={{fontFamily:'Cinzel,serif',fontSize:10,color:'var(--parchment-dark)',
-                    minWidth:80,overflow:'hidden',textOverflow:'ellipsis',whiteSpace:'nowrap'}}>
-                    {f.name||'Foe'} HP
-                  </span>
-                  <input type="number" min={0} max={f.maxHealth}
-                    value={f.hp}
-                    onChange={e=>{
-                      const v=Math.max(0,Math.min(parseInt(f.maxHealth)||999,parseInt(e.target.value)||0));
-                      setFoes(fs=>fs.map(x=>x.id===f.id?{...x,hp:v}:x));
-                    }}
-                    style={{width:70,background:'rgba(0,0,0,0.4)',border:'1px solid var(--slot-border)',
-                      color:'var(--blood-bright)',padding:'4px 8px',fontFamily:'Cinzel,serif',
-                      fontSize:13,outline:'none',borderRadius:1,textAlign:'center'}}/>
-                  <span style={{fontSize:11,color:'rgba(139,105,20,0.5)'}}>/ {f.maxHealth}</span>
+                <div key={f.id} style={{marginTop:10,paddingTop:8,borderTop:'1px solid rgba(90,74,32,0.2)'}}>
+                  <div style={{fontFamily:'Cinzel,serif',fontSize:8,letterSpacing:2,
+                    color:'var(--blood-bright)',textTransform:'uppercase',marginBottom:6}}>
+                    {f.name||'Foe'}
+                  </div>
+                  {/* Foe HP */}
+                  <div style={{display:'flex',alignItems:'center',gap:8,marginBottom:6}}>
+                    <span style={{fontFamily:'Cinzel,serif',fontSize:9,color:'var(--parchment-dark)',minWidth:52,letterSpacing:1}}>HP</span>
+                    <input type="number" min={0} max={f.maxHealth} value={f.hp}
+                      onChange={e=>{const v=Math.max(0,Math.min(parseInt(f.maxHealth)||999,parseInt(e.target.value)||0));setFoes(fs=>fs.map(x=>x.id===f.id?{...x,hp:v}:x));}}
+                      style={{width:60,background:'rgba(0,0,0,0.4)',border:'1px solid var(--slot-border)',
+                        color:'var(--blood-bright)',padding:'4px 6px',fontFamily:'Cinzel,serif',
+                        fontSize:13,outline:'none',borderRadius:1,textAlign:'center'}}/>
+                    <span style={{fontSize:11,color:'rgba(139,105,20,0.5)'}}>/ {f.maxHealth}</span>
+                  </div>
+                  {/* Foe stat penalties — + button reduces penalty (raises stat), − raises penalty (lowers stat) */}
+                  {[
+                    {k:'speedPenalty',  label:'Speed',  base:parseInt(f.speed)||0,  color:'var(--gold)'},
+                    {k:'brawnPenalty',  label:'Brawn',  base:parseInt(f.brawn)||0,  color:'#c0392b'},
+                    {k:'magicPenalty',  label:'Magic',  base:parseInt(f.magic)||0,  color:'#4a9eff'},
+                    {k:'armourPenalty', label:'Armour', base:parseInt(f.armour)||0, color:'#6dbf6d'},
+                  ].map(({k,label,base,color})=>{
+                    const pen=f[k]||0;
+                    const effective=Math.max(0,base-pen);
+                    return (
+                      <div key={k} style={{display:'flex',alignItems:'center',gap:6,marginBottom:5}}>
+                        <span style={{fontFamily:'Cinzel,serif',fontSize:9,color:'var(--parchment-dark)',minWidth:52,letterSpacing:1}}>{label}</span>
+                        <button onClick={()=>setFoes(fs=>fs.map(x=>x.id===f.id?{...x,[k]:Math.max(0,(x[k]||0)-1)}:x))}
+                          style={{width:22,height:22,cursor:'pointer',background:'rgba(45,106,45,0.15)',border:'1px solid rgba(74,158,74,0.4)',color:'#6dbf6d',fontFamily:'Cinzel,serif',fontSize:13,lineHeight:1,borderRadius:1}}>+</button>
+                        <span style={{fontFamily:'Cinzel Decorative,serif',fontSize:13,minWidth:28,textAlign:'center',color:pen>0?color:'var(--parchment-dark)'}}>
+                          {effective}
+                        </span>
+                        <button onClick={()=>setFoes(fs=>fs.map(x=>x.id===f.id?{...x,[k]:(x[k]||0)+1}:x))}
+                          style={{width:22,height:22,cursor:'pointer',background:'rgba(139,26,26,0.15)',border:'1px solid rgba(139,26,26,0.4)',color:'var(--blood-bright)',fontFamily:'Cinzel,serif',fontSize:13,lineHeight:1,borderRadius:1}}>−</button>
+                        {pen>0&&(<span style={{fontFamily:'Crimson Text,serif',fontSize:11,color:'var(--blood-bright)',fontStyle:'italic'}}>−{pen}</span>)}
+                        {pen>0&&(<button onClick={()=>setFoes(fs=>fs.map(x=>x.id===f.id?{...x,[k]:0}:x))}
+                          style={{padding:'1px 5px',fontFamily:'Cinzel,serif',fontSize:8,cursor:'pointer',background:'rgba(0,0,0,0.2)',border:'1px solid rgba(90,74,32,0.3)',color:'var(--parchment-dark)',borderRadius:1}}>↺</button>)}
+                      </div>
+                    );
+                  })}
                 </div>
               ))}
 
-              {/* Hero dice re-roll buttons */}
+              {/* Hero dice */}
               {heroDice.length>0&&(
-                <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:8,flexWrap:'wrap'}}>
+                <div style={{display:'flex',alignItems:'center',gap:6,marginBottom:8,
+                  flexWrap:'wrap',marginTop:10,paddingTop:8,borderTop:'1px solid rgba(90,74,32,0.2)'}}>
                   <span style={{fontFamily:'Cinzel,serif',fontSize:9,color:'var(--parchment-dark)',
                     textTransform:'uppercase',letterSpacing:1,marginRight:4}}>Your dice:</span>
                   {heroDice.map((d,i)=>(
                     <div key={i} style={{display:'flex',alignItems:'center',gap:3}}>
                       <input type="number" min={1} max={6} value={d}
-                        onChange={e=>{
-                          const v=Math.max(1,Math.min(6,parseInt(e.target.value)||1));
-                          const nd=[...heroDice]; nd[i]=v; setHeroDice(nd);
-                          _recalcWinner(nd,foes);
-                        }}
+                        onChange={e=>{const v=Math.max(1,Math.min(6,parseInt(e.target.value)||1));const nd=[...heroDice];nd[i]=v;setHeroDice(nd);_recalcWinner(nd,foes);}}
                         style={{width:42,background:'rgba(0,0,0,0.5)',border:'1px solid var(--slot-border)',
                           color:'var(--parchment-light)',padding:'3px',fontFamily:'Cinzel Decorative,serif',
                           fontSize:13,outline:'none',borderRadius:1,textAlign:'center'}}/>
                     </div>
-                  ))}
-                </div>
-              )}
-
-              {/* Damage dice re-roll buttons */}
-              {damageDice.length>0&&(
-                <div style={{display:'flex',alignItems:'center',gap:6,flexWrap:'wrap'}}>
-                  <span style={{fontFamily:'Cinzel,serif',fontSize:9,color:'var(--parchment-dark)',
-                    textTransform:'uppercase',letterSpacing:1,marginRight:4}}>Damage dice:</span>
-                  {damageDice.map((d,i)=>(
-                    <input key={i} type="number" min={1} max={6} value={d}
-                      onChange={e=>{
-                        const v=Math.max(1,Math.min(6,parseInt(e.target.value)||1));
-                        const nd=[...damageDice]; nd[i]=v;
-                        setDamageDice(nd);
-                        // Recalc damage total — include same bonuses as rollDamage
-                        const heroPath=hero.heroPath||hero.path;
-                        const isMage=heroPath==='mage';
-                        const dmgAttr=isMage?(computed.magic+cmods.magicBonus):(computed.brawn+cmods.brawnBonus);
-                        const target=foes.find(f=>f.id===activeFoeId)||liveFoes()[0];
-                        const foeArmour=Math.max(0,(parseInt(target?.armour)||0)-(target?.armourPenalty||0));
-                        // Apply per-die bonuses (acid/sear/shades) same as rollDamage
-                        const adjDice = nd.map(d => Math.min(12, d + dieBonusPerDie));
-                        const adjSum = adjDice.reduce((a,b)=>a+b,0);
-                        // Merciless bonus
-                        const foeDoT = target && (target.passives?.bleed||target.passives?.venom||target.passives?.disease||target.heroDoTs?.bleed||target.heroDoTs?.venom||target.heroDoTs?.disease);
-                        const merci = (hasMerciless && foeDoT) ? adjDice.length : 0;
-                        const raw=adjSum+dmgAttr+cmods.damageBonus+merci;
-                        setRoundDamage(cmods.piercingActive?raw:Math.max(0,raw-foeArmour));
-                      }}
-                      style={{width:42,background:'rgba(0,0,0,0.5)',border:'1px solid var(--slot-border)',
-                        color:'var(--blood-bright)',padding:'3px',fontFamily:'Cinzel Decorative,serif',
-                        fontSize:13,outline:'none',borderRadius:1,textAlign:'center'}}/>
                   ))}
                 </div>
               )}
