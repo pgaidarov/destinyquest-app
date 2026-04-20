@@ -4161,6 +4161,8 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     fatalBlowActive: false, // ignore HALF foe armour rounded up (Fatal Blow)
     // Per-combat hero stat adjustments (manual override panel) — survive round resets
     heroStatAdj: { brawn:0, magic:0, speed:0, armour:0 },
+    // Per-round hero stat adjustments — auto-cleared each rollInitiative
+    heroStatAdjRound: { brawn:0, magic:0, speed:0, armour:0 },
     dodgeActive: false,     // sidestep/evade/vanish/spider sense/dodge/command
     windwalkerActive: false,// use speed dice as damage dice
     criticalStrikeActive: false, // set all damage dice to 6
@@ -4357,12 +4359,14 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     + bloodFrenzyBonus
     + cmods.speedBonus
     + (cmods.reboundActive ? 2 : 0)
-    + (cmods.heroStatAdj?.speed || 0);
+    + (cmods.heroStatAdj?.speed || 0)
+    + (cmods.heroStatAdjRound?.speed || 0);
 
   // Effective armour
   const effectiveArmour = computed.armour + cmods.armourBonus
     + (cmods.shieldWallActive ? computed.armour : 0) // double if shield wall
-    + (cmods.heroStatAdj?.armour || 0);
+    + (cmods.heroStatAdj?.armour || 0)
+    + (cmods.heroStatAdjRound?.armour || 0);
 
   // Damage die bonus:
   // - searAcidBonus: only applies to a full damage SCORE roll (dice + brawn/magic).
@@ -4510,6 +4514,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       extraSpeedDice:0, extraDamageDice:0,
       piercingActive:false, fatalBlowActive:false, dodgeActive:false, windwalkerActive:false,
       heroStatAdj: { brawn:0, magic:0, speed:0, armour:0 },
+      heroStatAdjRound: { brawn:0, magic:0, speed:0, armour:0 },
       criticalStrikeActive:false, gutRipperActive:false, dominateActive:false,
       rakeActive:false, cleaveActive:false, blackRainActive:false, backfireActive:false,
       brutality2DiceActive:false, deflectActive:false, overpowerActive:false,
@@ -4990,6 +4995,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         mangleHoFActive: prev.mangleHoFActive,     // persistent once activated
         soulBurstUsed: prev.soulBurstUsed,         // persistent
         heroStatAdj: prev.heroStatAdj,             // persistent — only reset at combat start
+        heroStatAdjRound: { brawn:0, magic:0, speed:0, armour:0 }, // per-round — cleared every initiative
         hookedDieSaved: 0,                         // consumed: die was added to speedBonus already
         // rainingBlowsActive intentionally NOT reset — persists for full combat once activated
         poundSpeedPenalty: 0,
@@ -8761,7 +8767,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
                         fontSize:13,outline:'none',borderRadius:1,textAlign:'center'}}/>
                     <span style={{fontSize:11,color:'rgba(139,105,20,0.5)'}}>/ {f.maxHealth}</span>
                   </div>
-                  {/* Foe stat penalties — + button reduces penalty (raises stat), − raises penalty (lowers stat) */}
+                  {/* Foe stat adjustments — negative penalty = bonus above base */}
                   {[
                     {k:'speedPenalty',  label:'Speed',  base:parseInt(f.speed)||0,  color:'var(--gold)'},
                     {k:'brawnPenalty',  label:'Brawn',  base:parseInt(f.brawn)||0,  color:'#c0392b'},
@@ -8773,15 +8779,19 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
                     return (
                       <div key={k} style={{display:'flex',alignItems:'center',gap:6,marginBottom:5}}>
                         <span style={{fontFamily:'Cinzel,serif',fontSize:9,color:'var(--parchment-dark)',minWidth:52,letterSpacing:1}}>{label}</span>
-                        <button onClick={()=>setFoes(fs=>fs.map(x=>x.id===f.id?{...x,[k]:Math.max(0,(x[k]||0)-1)}:x))}
+                        <button onClick={()=>setFoes(fs=>fs.map(x=>x.id===f.id?{...x,[k]:(x[k]||0)-1}:x))}
                           style={{width:22,height:22,cursor:'pointer',background:'rgba(45,106,45,0.15)',border:'1px solid rgba(74,158,74,0.4)',color:'#6dbf6d',fontFamily:'Cinzel,serif',fontSize:13,lineHeight:1,borderRadius:1}}>+</button>
-                        <span style={{fontFamily:'Cinzel Decorative,serif',fontSize:13,minWidth:28,textAlign:'center',color:pen>0?color:'var(--parchment-dark)'}}>
+                        <span style={{fontFamily:'Cinzel Decorative,serif',fontSize:13,minWidth:28,textAlign:'center',
+                          color:pen!==0?color:'var(--parchment-dark)'}}>
                           {effective}
                         </span>
                         <button onClick={()=>setFoes(fs=>fs.map(x=>x.id===f.id?{...x,[k]:(x[k]||0)+1}:x))}
                           style={{width:22,height:22,cursor:'pointer',background:'rgba(139,26,26,0.15)',border:'1px solid rgba(139,26,26,0.4)',color:'var(--blood-bright)',fontFamily:'Cinzel,serif',fontSize:13,lineHeight:1,borderRadius:1}}>−</button>
-                        {pen>0&&(<span style={{fontFamily:'Crimson Text,serif',fontSize:11,color:'var(--blood-bright)',fontStyle:'italic'}}>−{pen}</span>)}
-                        {pen>0&&(<button onClick={()=>setFoes(fs=>fs.map(x=>x.id===f.id?{...x,[k]:0}:x))}
+                        {pen!==0&&(<span style={{fontFamily:'Crimson Text,serif',fontSize:11,fontStyle:'italic',
+                          color:pen>0?'var(--blood-bright)':'#6dbf6d'}}>
+                          {pen>0?`−${pen}`:`+${Math.abs(pen)}`}
+                        </span>)}
+                        {pen!==0&&(<button onClick={()=>setFoes(fs=>fs.map(x=>x.id===f.id?{...x,[k]:0}:x))}
                           style={{padding:'1px 5px',fontFamily:'Cinzel,serif',fontSize:8,cursor:'pointer',background:'rgba(0,0,0,0.2)',border:'1px solid rgba(90,74,32,0.3)',color:'var(--parchment-dark)',borderRadius:1}}>↺</button>)}
                       </div>
                     );
