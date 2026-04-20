@@ -394,12 +394,12 @@ const styles = `
   /* ── Sheet Grid ── */
   .sheet-grid {
     display: grid;
-    grid-template-columns: 1fr 1.15fr;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1.15fr);
     gap: 16px;
   }
 
   @media (max-width: 640px) {
-    .sheet-grid { grid-template-columns: 1fr; }
+    .sheet-grid { grid-template-columns: minmax(0, 1fr); }
   }
 
   /* ── Panel ── */
