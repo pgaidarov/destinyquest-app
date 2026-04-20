@@ -11,7 +11,7 @@ document.head.appendChild(fontLink);
 if (!document.querySelector('meta[name="viewport"]')) {
   const vp = document.createElement('meta');
   vp.name = 'viewport';
-  vp.content = 'width=device-width, initial-scale=1, maximum-scale=1';
+  vp.content = 'width=device-width, initial-scale=1';
   document.head.appendChild(vp);
 }
 
@@ -37,14 +37,23 @@ const styles = `
 
   * { box-sizing: border-box; margin: 0; padding: 0; }
 
+  html {
+    overflow-x: hidden;
+    background: #0d0a06;
+  }
+
   body {
     background: #0d0a06;
     color: var(--parchment-light);
     font-family: 'Crimson Text', Georgia, serif;
     min-height: 100vh;
+    overflow-x: hidden;
+    max-width: 100%;
   }
 
   .app {
+    width: 100%;
+    overflow-x: hidden;
     min-height: 100vh;
     background:
       radial-gradient(ellipse at 20% 10%, rgba(139,26,26,0.08) 0%, transparent 50%),
@@ -232,6 +241,8 @@ const styles = `
     flex-direction: column;
     min-height: 100vh;
     max-width: 900px;
+    width: 100%;
+    overflow-x: hidden;
     margin: 0 auto;
     padding: 16px;
     gap: 16px;
@@ -565,6 +576,7 @@ const styles = `
     display: flex;
     justify-content: center;
     align-items: flex-start;
+    max-width: 100%;
     /* Height = layout height × scale. Default scale = 1, so 585px */
     min-height: 585px;
     padding: 16px 8px 20px;
