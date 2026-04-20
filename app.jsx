@@ -242,7 +242,6 @@ const styles = `
     min-height: 100vh;
     max-width: 900px;
     width: 100%;
-    overflow-x: hidden;
     margin: 0 auto;
     padding: 16px;
     gap: 16px;
@@ -1275,6 +1274,12 @@ const styles = `
   ::-webkit-scrollbar { width: 4px; }
   ::-webkit-scrollbar-track { background: rgba(0,0,0,0.3); }
   ::-webkit-scrollbar-thumb { background: var(--slot-border); border-radius: 2px; }
+
+  /* ── Viewport safeguard — caps layout to physical screen even if viewport meta fires late ── */
+  .app      { max-width: 100vw; }
+  .main-layout { max-width: min(900px, 100vw); }
+  .tab-bar  { max-width: 100%; }
+  .sheet-grid, .panel, .panel-body { max-width: 100%; }
 
   /* ── Mobile Breakpoints ── */
   @media (max-width: 640px) {
