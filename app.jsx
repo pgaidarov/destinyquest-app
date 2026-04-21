@@ -4588,7 +4588,11 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     setTimeout(() => {
       const target = foes.find(f=>f.id===preTarget) || foes[0];
       const heroPath = hero.heroPath || hero.path;
-      const dmgAttr  = heroPath==='mage' ? computed.magic : computed.brawn;
+      // Rules: damage = dice + highest of (brawn, magic) — same rule as main damage roll
+      const preBrawn = computed.brawn + cmods.brawnBonus + (cmods.heroStatAdj?.brawn || 0);
+      const preMagic = computed.magic + cmods.magicBonus + (cmods.heroStatAdj?.magic || 0);
+      const dmgAttr  = Math.max(preBrawn, preMagic);
+      const dmgAttrName = preBrawn >= preMagic ? 'brawn' : 'magic';
 
       // Helper: auto-apply hero DoT passives to the target foe when pre-combat
       // damage causes health loss. FAQ Q9: DoT tick starts at end of round 1.
@@ -4608,10 +4612,12 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
 
       if (hasFirstStrike || hasBullsEye) {
         const d = rollD6();
-        const raw = d + dmgAttr + dieBonusPerDie;
+        const adjustedD = d + dieBonusPerDie;
+        const raw = adjustedD + dmgAttr;
         const newHp = Math.max(0, target.hp - raw);
         setFoes(fs => fs.map(f => f.id===target.id ? {...f, hp:newHp} : f));
-        addLog(`${hasFirstStrike?'First Strike':"Bull's Eye"}: [${d}]+${dmgAttr}=${raw} dmg to ${target.name} (ignores armour)`, 'log-hit');
+        const diceDisplay = dieBonusPerDie > 0 ? `[${d}](+${dieBonusPerDie}/die acid/sear)→[${adjustedD}]` : `[${d}]`;
+        addLog(`${hasFirstStrike?'First Strike':"Bull's Eye"}: ${diceDisplay}+${dmgAttr}${dmgAttrName}=${raw} dmg to ${target.name} (ignores armour)`, 'log-hit');
         applyPreCombatDoTs(raw);
         setPreDice([d]);
         if (newHp <= 0) { endCombat('hero'); setPreRollDone(true); setRolling(false); return; }
@@ -4694,17 +4700,18 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       if (!c || !c.alive || c.defeatedFired) return c;
       addLog(`💀 ${c.name} has been defeated!`, 'log-hit');
       if (hasBrokenBond && c.type === 'mastiff') {
-        const roll = rollD6(); const dmg = roll + 2;
+        const roll = rollD6(); const dmg = roll+2+dieBonusNoScore;
         const t = foes.find(f => f.id===activeFoeId && f.hp>0) || foes.find(f => f.hp>0);
         if (t) {
           setFoes(fs => fs.map(f => f.id===t.id ? {...f, hp: Math.max(0, f.hp-dmg)} : f));
-          addLog(`🐕 Broken Bond: [${roll}]+2=${dmg} dmg to ${t.name} (ignores armour).`, 'log-hit');
+          addLog(`🐕 Broken Bond: [${roll}]+2${dieBonusNoScore?`+${dieBonusNoScore}sh`:''}=${dmg} dmg to ${t.name} (ignores armour).`, 'log-hit');
         }
       }
       if (hasVolatileLink && c.type === 'minion') {
         const roll = rollD6();
-        setFoes(fs => fs.map(f => f.hp>0 ? {...f, hp: Math.max(0, f.hp-roll)} : f));
-        addLog(`💥 Volatile Link: Minion explodes! [${roll}] dmg to all opponents (ignores armour).`, 'log-hit');
+        const vlDmg = roll+dieBonusNoScore;
+        setFoes(fs => fs.map(f => f.hp>0 ? {...f, hp: Math.max(0, f.hp-vlDmg)} : f));
+        addLog(`💥 Volatile Link: Minion explodes! [${roll}]${dieBonusNoScore?`+${dieBonusNoScore}sh`:''}=${vlDmg} dmg to all opponents (ignores armour).`, 'log-hit');
       }
       if (c.type === 'minion' && hasResurrection && !c.resurrectionUsed) {
         addLog(`⚡ Resurrection available — click the ability button to spend 3 magic and revive.`, 'log-win');
@@ -4826,7 +4833,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
 
         // Shield Spin
         if (hasShieldSpin && fd.some(d=>d===1)) {
-          const spinDmg = rollD6();
+          const spinDmg = rollD6()+dieBonusNoScore;
           const newHp = Math.max(0, foeExtra.hp - spinDmg);
           addLog(`🛡 Shield Spin: ${f.name} rolled [1], takes ${spinDmg} dmg`, 'log-hit');
           foeExtra.hp = newHp;
@@ -5177,8 +5184,9 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         'dark distraction','glimmer dust','gloom','misdirection','confound','veil'].some(n=>key.includes(n));
       if (hasVeiledStrike && isDodgeType) {
         const d = rollD6();
-        setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-d)}:f));
-        addLog(`🗡 Veiled Strike: [${d}] dmg to ${activeFoe?.name} (ignores armour).`, 'log-passive');
+        const vsDmg = d+dieBonusNoScore;
+        setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-vsDmg)}:f));
+        addLog(`🗡 Veiled Strike: [${d}]${dieBonusNoScore?`+${dieBonusNoScore}sh`:''}=${vsDmg} dmg to ${activeFoe?.name} (ignores armour).`, 'log-passive');
       }
       // Cutthroat (Dune pa): dodge → brawn +1 permanent
       if (hasCutthroat && isDodgeType) {
@@ -5324,14 +5332,14 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       setCmods(p=>({...p, magicBonus: p.magicBonus+3, surgeActive:true, surgeSpeedPenalty:1}));
       addLog(`${name}: +3 magic this round. -1 speed next round.`, 'log-roll');
     } else if (key.includes('ice shard')) {
-      const magic = computed.magic + cmods.magicBonus;
+      const magic = computed.magic + cmods.magicBonus + (cmods.heroStatAdj?.magic || 0);
       setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-magic)}:f));
       addLog(`❄ Ice Shards: ${magic} dmg to ${activeFoe?.name} (ignores armour, = magic score)`, 'log-hit');
       trackBloodRage(magic);
       setPhase('post-damage');
     } else if (key.includes('ignite')) {
       const d1=rollD6(), d2=rollD6();
-      const dmg = d1+d2+dieBonusNoScore;
+      const dmg = d1+d2+(2*dieBonusNoScore);
       // Apply damage AND per-foe DoTs to every live foe in one update
       setFoes(fs=>fs.map(f=>{
         if (f.hp <= 0) return f;
@@ -5346,7 +5354,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         }
         return updated;
       }));
-      addLog(`🔥 Ignite: [${d1}]+[${d2}]${dieBonusNoScore?`+${dieBonusNoScore}shades`:''}=${dmg} to ALL foes (ignores armour). Burn applied!`, 'log-hit');
+      addLog(`🔥 Ignite: [${d1}]+[${d2}]${dieBonusNoScore?`+${2*dieBonusNoScore}sh`:''}=${dmg} to ALL foes (ignores armour). Burn applied!`, 'log-hit');
       if (dmg > 0) {
         if (hasVenom)     addLog(`Venom applied to all foes (Ignite).`,'log-passive');
         if (hasBleed || hasToxicBlades) addLog(`Bleed applied to all foes (Ignite).`,'log-passive');
@@ -5406,9 +5414,9 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       if (winner==='foe') {
         if (['brutality','deflect','overpower'].some(n=>key.includes(n))) {
           const d1=rollD6(),d2=rollD6();
-          const dmg=d1+d2;
+          const dmg=d1+d2+(2*dieBonusNoScore);
           setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-dmg)}:f));
-          addLog(`${name}: foe damage negated! [${d1}]+[${d2}]=${dmg} back to foe (ignores armour)`, 'log-hit');
+          addLog(`${name}: foe damage negated! [${d1}]+[${d2}]${dieBonusNoScore?`+${2*dieBonusNoScore}sh`:''}=${dmg} back to foe (ignores armour)`, 'log-hit');
         } else {
           addLog(`${name}: foe damage negated! Round ends.`, 'log-passive');
         }
@@ -5432,9 +5440,9 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       } else {
         // Release
         const dice=[rollD6(),rollD6(),rollD6()];
-        const dmg=dice.reduce((a,b)=>a+b,0);
+        const dmg=dice.reduce((a,b)=>a+b,0)+(3*dieBonusNoScore);
         setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-dmg)}:f));
-        addLog(`⚡ Bolt release: [${dice.join('][')}]=${dmg} to ${activeFoe?.name} (ignores armour)`, 'log-hit');
+        addLog(`⚡ Bolt release: [${dice.join('][')}]${dieBonusNoScore?`+${3*dieBonusNoScore}sh`:''}=${dmg} to ${activeFoe?.name} (ignores armour)`, 'log-hit');
         setCmods(p=>({...p, boltReleaseActive:false}));
         setUsedOnce(prev => new Set([...prev, 'bolt_released']));
         trackBloodRage(dmg);
@@ -5458,14 +5466,18 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       }
     } else if (key.includes('shield wall')) {
       const d=rollD6();
-      setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-d)}:f));
-      setCmods(p=>({...p, shieldWallActive:true, armourBonus: p.armourBonus+computed.armour}));
-      addLog(`${name}: armour doubled to ${effectiveArmour*2}. [${d}] dmg to foe.`, 'log-roll');
+      const dmg=d+dieBonusNoScore;
+      setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-dmg)}:f));
+      // Double current effective armour — add the full effectiveArmour as a bonus so result = 2×effectiveArmour
+      setCmods(p=>({...p, shieldWallActive:true, armourBonus: p.armourBonus+effectiveArmour}));
+      const doubled=effectiveArmour*2;
+      addLog(`${name}: armour doubled to ${doubled}. [${d}]${dieBonusNoScore?`+${dieBonusNoScore}sh`:''}=${dmg} dmg to foe (ignores armour).`, 'log-roll');
     } else if (key.includes('thorn armour')) {
       const d=rollD6();
-      setFoes(fs=>fs.map(f=>f.hp>0?{...f,hp:Math.max(0,f.hp-d)}:f));
+      const dmg=d+dieBonusNoScore;
+      setFoes(fs=>fs.map(f=>f.hp>0?{...f,hp:Math.max(0,f.hp-dmg)}:f));
       setCmods(p=>({...p, armourBonus: p.armourBonus+3}));
-      addLog(`${name}: +3 armour; [${d}] to all foes (ignores armour)`, 'log-roll');
+      addLog(`${name}: +3 armour; [${d}]${dieBonusNoScore?`+${dieBonusNoScore}sh`:''}=${dmg} to all foes (ignores armour)`, 'log-roll');
     } else if (key.includes('windwalker')) {
       setCmods(p=>({...p, windwalkerActive:true}));
       addLog(`${name}: use speed dice sum as damage score.`, 'log-roll');
@@ -5476,8 +5488,9 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         setUsedOnce(prev => { const s=new Set(prev); s.delete(key); return s; }); return;
       }
       const d=rollD6();
-      setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-d)}:f));
-      addLog(`${name}: [${d}] dmg back to ${activeFoe?.name} (ignores armour)`, 'log-hit');
+      const dmg=d+dieBonusNoScore;
+      setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-dmg)}:f));
+      addLog(`${name}: [${d}]${dieBonusNoScore?`+${dieBonusNoScore}sh`:''}=${dmg} dmg back to ${activeFoe?.name} (ignores armour)`, 'log-hit');
     } else if (key.includes('spore cloud') || key.includes('thorn fist')) {
       // Glossary: "when your opponent's damage score/damage dice causes health damage" — foe must win
       if (winner !== 'foe') {
@@ -5485,9 +5498,9 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         setUsedOnce(prev => { const s=new Set(prev); s.delete(key); return s; }); return;
       }
       const d1=rollD6(),d2=rollD6();
-      const dmg=d1+d2;
+      const dmg=d1+d2+(2*dieBonusNoScore);
       setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-dmg)}:f));
-      addLog(`${name}: [${d1}]+[${d2}]=${dmg} back to ${activeFoe?.name} (ignores armour)`, 'log-hit');
+      addLog(`${name}: [${d1}]+[${d2}]${dieBonusNoScore?`+${2*dieBonusNoScore}sh`:''}=${dmg} back to ${activeFoe?.name} (ignores armour)`, 'log-hit');
     } else if (key.includes('judgement')) {
       // Glossary: "when you take health damage from your opponent's damage score" — foe must win
       if (winner !== 'foe') {
@@ -5649,9 +5662,10 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
 
       const doDamageReroll = () => {
         const foe = foes.find(f=>f.id===activeFoeId);
-        const foeDmgAttr = foe?.usesMagic
-          ? Math.max(0,(parseInt(foe.magic)||0)-(foe.magicPenalty||0)-(foe.magicPenaltyThisRound||0))
-          : Math.max(0,(parseInt(foe.brawn)||0)-(foe.brawnPenalty||0)-(foe.brawnPenaltyThisRound||0));
+        const rBrawn = Math.max(0,(parseInt(foe.brawn)||0)-(foe.brawnPenalty||0)-(foe.brawnPenaltyThisRound||0));
+        const rMagic = Math.max(0,(parseInt(foe.magic)||0)-(foe.magicPenalty||0)-(foe.magicPenaltyThisRound||0));
+        const foeDmgAttr = Math.max(rBrawn, rMagic);
+        const foeDmgAttrName = rBrawn >= rMagic ? 'brawn' : 'magic';
         const newDice = damageDice.map(()=>rollD6());
         const adjDice = newDice.map(d => cmods.secondSightActive ? Math.max(1,d-2) : d);
         const diceSum = adjDice.reduce((a,b)=>a+b,0);
@@ -5661,7 +5675,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         setDamageDice(newDice);
         setRoundDamage(newRoundDamage);
         const ssNote = cmods.secondSightActive ? ` (second sight -2 each)` : '';
-        addLog(`${name} (damage): foe damage re-rolled [${adjDice.join('][')}]${ssNote}+${foeDmgAttr}=${dmgScore} vs ${heroArm}arm → ${newRoundDamage}dmg`, 'log-roll');
+        addLog(`${name} (damage): foe damage re-rolled [${adjDice.join('][')}]${ssNote}+${foeDmgAttr}${foeDmgAttrName}=${dmgScore} vs ${heroArm}arm → ${newRoundDamage}dmg`, 'log-roll');
       };
 
       if (canRerollSpeed && canRerollDamage) {
@@ -5764,7 +5778,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     } else if (key.includes('brain drain')) {
       // Glossary: "You MAY spend magic… up to a maximum of 5 magic points."
       // Player must choose how much to spend — auto-spending max is not rules-accurate.
-      const availMagic = computed.magic + cmods.magicBonus;
+      const availMagic = computed.magic + cmods.magicBonus + (cmods.heroStatAdj?.magic || 0);
       const maxSpend = Math.min(5, availMagic);
       if (maxSpend <= 0) {
         addLog(`${name}: no magic available to spend.`, 'log-passive');
@@ -6207,9 +6221,10 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     } else if (key.includes('dark distraction')) {
       if(winner!=='foe'){addLog(`${name}: only usable when foe wins.`,'log-passive');setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;});return;}
       const d=rollD6();
-      setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-d)}:f));
+      const dmg=d+dieBonusNoScore;
+      setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-dmg)}:f));
       setCmods(p=>({...p,dodgeActive:true}));
-      addLog(`${name}: damage avoided. [${d}] dmg to ${activeFoe?.name} (ignores armour).`,'log-hit');
+      addLog(`${name}: damage avoided. [${d}]${dieBonusNoScore?`+${dieBonusNoScore}sh`:''}=${dmg} dmg to ${activeFoe?.name} (ignores armour).`,'log-hit');
       setPhase('post-damage');
     } else if (key.includes('glimmer dust')) {
       if(winner!=='foe'){addLog(`${name}: only usable when foe wins.`,'log-passive');setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;});return;}
@@ -6228,21 +6243,23 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     } else if (key.includes('back draft')) {
       if(winner!=='foe'){addLog(`${name}: only usable when foe wins.`,'log-passive');setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;});return;}
       const d1=rollD6(),d2=rollD6();
-      setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-(d1+d2))}:f));
-      addLog(`${name}: [${d1}]+[${d2}]=${d1+d2} back to ${activeFoe?.name} (ignores armour).`,'log-hit');
+      const dmg=d1+d2+(2*dieBonusNoScore);
+      setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-dmg)}:f));
+      addLog(`${name}: [${d1}]+[${d2}]${dieBonusNoScore?`+${2*dieBonusNoScore}sh`:''}=${dmg} back to ${activeFoe?.name} (ignores armour).`,'log-hit');
     } else if (key.includes('counter')) {
       if(winner!=='foe'){addLog(`${name}: only usable when foe wins.`,'log-passive');setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;});return;}
       const d=rollD6();
-      // Lower foe damage score by 2 AND deal 1 die back
-      setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-d)}:f));
+      const dmg=d+dieBonusNoScore;
+      setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-dmg)}:f));
       setCmods(p=>({...p,foeDmgScorePenalty:(p.foeDmgScorePenalty||0)+2}));
-      addLog(`${name}: foe damage score -2. [${d}] dmg back to ${activeFoe?.name} (ignores armour).`,'log-hit');
+      addLog(`${name}: foe damage score -2. [${d}]${dieBonusNoScore?`+${dieBonusNoScore}sh`:''}=${dmg} dmg back to ${activeFoe?.name} (ignores armour).`,'log-hit');
     } else if (key.includes('retribution') || (key.includes('shock blast') && hero.bookId==='rods')) {
       // Retribution: 1 die to ALL foes. Shock blast (EoWF) = revenge = same.
       if(winner!=='foe'){addLog(`${name}: only usable when foe wins.`,'log-passive');setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;});return;}
       const d=rollD6();
-      setFoes(fs=>fs.map(f=>f.hp>0?{...f,hp:Math.max(0,f.hp-d)}:f));
-      addLog(`${name}: [${d}] dmg to ALL remaining foes (ignores armour).`,'log-hit');
+      const dmg=d+dieBonusNoScore;
+      setFoes(fs=>fs.map(f=>f.hp>0?{...f,hp:Math.max(0,f.hp-dmg)}:f));
+      addLog(`${name}: [${d}]${dieBonusNoScore?`+${dieBonusNoScore}sh`:''}=${dmg} dmg to ALL remaining foes (ignores armour).`,'log-hit');
     } else if (key.includes('storm shock')) {
       if(winner!=='foe'){addLog(`${name}: only usable when foe wins.`,'log-passive');setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;});return;}
       setFoes(fs=>fs.map(f=>f.hp>0?{...f,hp:Math.max(0,f.hp-3)}:f));
@@ -6250,8 +6267,9 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     } else if (key.includes('spectral claws')) {
       if(winner!=='foe'){addLog(`${name}: only usable when foe wins.`,'log-passive');setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;});return;}
       const d=rollD6();
-      setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-d)}:f));
-      addLog(`${name}: [${d}] dmg back to ${activeFoe?.name} (ignores armour).`,'log-hit');
+      const dmg=d+dieBonusNoScore;
+      setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-dmg)}:f));
+      addLog(`${name}: [${d}]${dieBonusNoScore?`+${dieBonusNoScore}sh`:''}=${dmg} dmg back to ${activeFoe?.name} (ignores armour).`,'log-hit');
     } else if (key.includes('windfall')) {
       if(winner!=='foe'){addLog(`${name}: only usable when foe wins.`,'log-passive');setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;});return;}
       const speedKeys=[...(heroAbils.speed||[])].map(n=>n.toLowerCase());
@@ -6363,7 +6381,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       setPhase('post-damage');
     } else if (key.includes('wave')) {
       if(winner!=='hero'){addLog(`${name}: only usable when you win.`,'log-passive');setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;});return;}
-      const magic=computed.magic+cmods.magicBonus;
+      const magic=computed.magic+cmods.magicBonus+(cmods.heroStatAdj?.magic||0);
       // Distribute magic score as damage across all foes (each ≤ half magic, round up)
       const maxPerFoe=Math.ceil(magic/2);
       const liveFoeList=foes.filter(f=>f.hp>0);
@@ -6401,8 +6419,6 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       const spreadList=Object.entries(srcDoTs).filter(([,v])=>v).map(([k])=>k).join(', ');
       addLog(`${name}: spread [${spreadList||'none'}] from ${srcFoe.name} to all other foes.`,'log-passive');
       setPhase('post-damage');
-    } else if (key.includes('virulence')) {
-      setPhase('post-damage'); // fallthrough
     } else if (key.includes('poison cloud')) {
       if(winner!=='hero'){addLog(`${name}: only usable when you win.`,'log-passive');setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;});return;}
       // 1 damage to 2 adjacent foes at end of every round — store as persistent foe DoT via heroDoTs 'poisonCloud' flag
@@ -6536,10 +6552,11 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         const d=rollD6();
         const newDmgDice=[...damageDice,d];
         setDamageDice(newDmgDice);
-        // Recalculate roundDamage
+        // Recalculate roundDamage using Math.max(brawn, magic) — same rule as main rollDamage
         const target=foes.find(f=>f.id===activeFoeId);
-        const heroPath=hero.heroPath||hero.path; const isMage=heroPath==='mage';
-        const dmgAttr=isMage?(computed.magic+cmods.magicBonus+(cmods.heroStatAdj?.magic||0)):(computed.brawn+cmods.brawnBonus+(cmods.heroStatAdj?.brawn||0));
+        const ctBrawn=computed.brawn+cmods.brawnBonus+(cmods.heroStatAdj?.brawn||0);
+        const ctMagic=computed.magic+cmods.magicBonus+(cmods.heroStatAdj?.magic||0);
+        const dmgAttr=Math.max(ctBrawn,ctMagic);
         const foeArm=calcFoeArmour(target);
         const rawScore=newDmgDice.reduce((a,b)=>a+b,0)+dmgAttr+cmods.damageBonus;
         setRoundDamage(Math.max(0,rawScore-foeArm));
@@ -6693,7 +6710,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         if(f.hp<=0)return f;
         const extra=(f.heroDoTs?.bleed||f.passives?.bleed)?4:0;
         const dmg=base+extra;
-        addLog(`${name}: [${d1}]+[${d2}]${extra?`+4(bleed)`:''}=${dmg} to ${f.name}${extra?' (bleed bonus!)':''}.`,'log-hit');
+        addLog(`${name}: [${d1}]+[${d2}]${dieBonusNoScore?`+${2*dieBonusNoScore}sh`:''}${extra?`+4(bleed)`:''}=${dmg} to ${f.name}${extra?' (bleed bonus!)':''}.`,'log-hit');
         return {...f,hp:Math.max(0,f.hp-dmg)};
       }));
       trackBloodRage(base); setPhase('post-damage');
@@ -6705,9 +6722,10 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       // HoF (co): dodge + 1 die back + foe brawn&magic -1 permanent
       if(winner!=='foe'){addLog(`${name}: only usable when foe wins.`,'log-passive');setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;});return;}
       const d=rollD6();
-      setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-d),brawnPenalty:(f.brawnPenalty||0)+1,magicPenalty:(f.magicPenalty||0)+1}:f));
+      const dmg=d+dieBonusNoScore;
+      setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-dmg),brawnPenalty:(f.brawnPenalty||0)+1,magicPenalty:(f.magicPenalty||0)+1}:f));
       setCmods(p=>({...p,dodgeActive:true}));
-      addLog(`${name}: damage avoided. [${d}] back to ${activeFoe?.name} (ignores armour). Foe brawn & magic each -1 permanent.`,'log-hit');
+      addLog(`${name}: damage avoided. [${d}]${dieBonusNoScore?`+${dieBonusNoScore}sh`:''}=${dmg} back to ${activeFoe?.name} (ignores armour). Foe brawn & magic each -1 permanent.`,'log-hit');
       setPhase('post-damage');
     } else if (key.includes('doom')) {
       // HoF (co): foe armour, brawn, AND magic each -1 permanent
@@ -6728,27 +6746,29 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       if(winner!=='hero'){addLog(`${name}: only usable when you win.`,'log-passive');setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;});return;}
       const r=rollD6();
       const d=rollD6();
+      const foeDmg=d+dieBonusNoScore;
+      const foeDmgStr=`[${d}]${dieBonusNoScore?`+${dieBonusNoScore}sh`:''}=${foeDmg}`;
       if(r===1){
         const selfDmg=rollD6();
         const newHeroHp=Math.max(0,heroHp-selfDmg);
         setHeroHp(newHeroHp);
-        setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-d)}:f));
-        addLog(`${name}: [1] — both take damage! Foe [${d}], hero [${selfDmg}] dmg (ignores armour).`,'log-hit');
+        setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-foeDmg)}:f));
+        addLog(`${name}: [1] — both take damage! Foe ${foeDmgStr}, hero [${selfDmg}] dmg (ignores armour).`,'log-hit');
         if(newHeroHp<=0){endCombat('foe');return;}
       } else if(r<=3){
         const h=Math.min(computed.maxHealth,heroHp+5); setHeroHp(h);onHeroHealthChange(h);
-        setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-d)}:f));
-        addLog(`${name}: [${r}] — +5 HP, foe [${d}] dmg (ignores armour).`,'log-heal');
+        setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-foeDmg)}:f));
+        addLog(`${name}: [${r}] — +5 HP, foe ${foeDmgStr} dmg (ignores armour).`,'log-heal');
       } else if(r<=5){
         const h=Math.min(computed.maxHealth,heroHp+8); setHeroHp(h);onHeroHealthChange(h);
-        setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-d)}:f));
-        addLog(`${name}: [${r}] — +8 HP, foe [${d}] dmg (ignores armour).`,'log-heal');
+        setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-foeDmg)}:f));
+        addLog(`${name}: [${r}] — +8 HP, foe ${foeDmgStr} dmg (ignores armour).`,'log-heal');
       } else {
         const h=Math.min(computed.maxHealth,heroHp+8); setHeroHp(h);onHeroHealthChange(h);
-        setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-d)}:f));
-        addLog(`${name}: [6] — +8 HP to you & ally, foe [${d}] dmg (ignores armour).`,'log-heal');
+        setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-foeDmg)}:f));
+        addLog(`${name}: [6] — +8 HP to you & ally, foe ${foeDmgStr} dmg (ignores armour).`,'log-heal');
       }
-      trackBloodRage(d); setPhase('post-damage');
+      trackBloodRage(foeDmg); setPhase('post-damage');
     } else if (key.includes('monkey mob') || key.includes('packmaster') || key.includes('thorn cage')) {
       // HoF: summon persistent 2 dmg/round DoT until doubles (monkey mob/packmaster) or just 1/round (thorn cage)
       if(winner!=='hero'){addLog(`${name}: only usable when you win.`,'log-passive');setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;});return;}
@@ -6777,15 +6797,19 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     } else if (key.includes('slick')) {
       // HoF (co): use speed dice total as damage score (+ brawn)
       if(winner!=='hero'){addLog(`${name}: only usable when you win.`,'log-passive');setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;});return;}
-      const heroPath=hero.heroPath||hero.path; const isMage=heroPath==='mage';
+      const heroPath=hero.heroPath||hero.path;
       const speedTotal=heroDice.reduce((a,b)=>a+b,0);
-      const dmgAttr=isMage?(computed.magic+cmods.magicBonus+(cmods.heroStatAdj?.magic||0)):(computed.brawn+cmods.brawnBonus+(cmods.heroStatAdj?.brawn||0));
+      // Rules: damage score = dice + highest of (brawn, magic)
+      const slickBrawn=computed.brawn+cmods.brawnBonus+(cmods.heroStatAdj?.brawn||0);
+      const slickMagic=computed.magic+cmods.magicBonus+(cmods.heroStatAdj?.magic||0);
+      const dmgAttr=Math.max(slickBrawn,slickMagic);
+      const dmgAttrName=slickBrawn>=slickMagic?'brawn':'magic';
       const target=foes.find(f=>f.id===activeFoeId);
       const foeArm=calcFoeArmour(target);
       const rawScore=speedTotal+dmgAttr+cmods.damageBonus;
       const dmgDealt=Math.max(0,rawScore-foeArm);
       setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-dmgDealt)}:f));
-      addLog(`${name}: speed dice [${heroDice.join('][')}](${speedTotal})+${dmgAttr}+${cmods.damageBonus}=${rawScore} vs ${foeArm}arm → ${dmgDealt}dmg to ${target?.name}.`,'log-hit');
+      addLog(`${name}: speed dice [${heroDice.join('][')}](${speedTotal})+${dmgAttr}${dmgAttrName}+${cmods.damageBonus}=${rawScore} vs ${foeArm}arm → ${dmgDealt}dmg to ${target?.name}.`,'log-hit');
       trackBloodRage(dmgDealt); setPhase('post-damage');
     } else if (key.includes('spirit mark')) {
       // HoF (co+mo): after causing health damage, mark foe for +2 damage all future rounds
@@ -6896,10 +6920,10 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       }
       if (winner!=='hero'){addLog(`${name}: only usable when you win.`,'log-passive');setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;});return;}
       const [bb1,bb2,bb3]=[rollD6(),rollD6(),rollD6()];
-      const bbDmg = bb1+bb2+bb3;
+      const bbDmg = bb1+bb2+bb3+(3*dieBonusNoScore);
       setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-bbDmg)}:f));
       setCmods(p=>({...p, slamSpeedPenalty:(p.slamSpeedPenalty||0)+1}));
-      addLog(`🔫 ${name}: [${bb1}][${bb2}][${bb3}]=${bbDmg} dmg to ${activeFoe?.name} (ignores armour). Foe -1 speed next round.`,'log-hit');
+      addLog(`🔫 ${name}: [${bb1}][${bb2}][${bb3}]${dieBonusNoScore?`+${3*dieBonusNoScore}sh`:''}=${bbDmg} dmg to ${activeFoe?.name} (ignores armour). Foe -1 speed next round.`,'log-hit');
       trackBloodRage(bbDmg); setPhase('post-damage');
 
     } else {
@@ -6914,7 +6938,6 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     setPendingDiceAction(null);
     setTimeout(() => {
       const heroPath = hero.heroPath || hero.path;
-      const isMage = heroPath === 'mage';
       const target = foes.find(f=>f.id===activeFoeId) || liveFoes()[0];
 
       if (who === 'hero') {
@@ -6950,10 +6973,11 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         }
         const allDice = [...adjustedDice, ...extraFromRaining];
 
-        const dmgAttr = isMage
-          ? (computed.magic + cmods.magicBonus + (cmods.heroStatAdj?.magic || 0))
-          : (computed.brawn + cmods.brawnBonus + (cmods.heroStatAdj?.brawn || 0));
-        const dmgAttrName = isMage ? 'magic' : 'brawn';
+        // Rules: damage score = dice + highest of (brawn, magic). Not class-locked.
+        const heroBrawnDmg = computed.brawn + cmods.brawnBonus + (cmods.heroStatAdj?.brawn || 0);
+        const heroMagicDmg = computed.magic + cmods.magicBonus + (cmods.heroStatAdj?.magic || 0);
+        const dmgAttr = Math.max(heroBrawnDmg, heroMagicDmg);
+        const dmgAttrName = heroBrawnDmg >= heroMagicDmg ? 'brawn' : 'magic';
         const diceSum = allDice.reduce((a,b)=>a+b,0);
 
         // Merciless: +1 per die if THE TARGET FOE has been inflicted with Bleed, Disease or Venom.
@@ -6982,13 +7006,18 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         const pierceNote  = cmods.piercingActive ? ' (piercing — ignores armour)'
                           : cmods.fatalBlowActive ? ` (fatal blow — ${foeArmour} armour remaining)`
                           : ``;
-        const acidNote    = dieBonusPerDie > 0 ? ` +${dieBonusPerDie}/die(acid/sear/bonus)` : '';
+        const acidNote    = dieBonusPerDie > 0 ? ` (+${dieBonusPerDie}/die acid/sear)` : '';
         const mercilessNote = mercilessBonus  ? ` +${mercilessBonus}(merciless)` : '';
         const extraNote   = extraFromRaining.length ? ` +raining blows[${extraFromRaining.join('][')}]` : '';
         const mangleNote  = mangleBonus       ? ` +${mangleBonus}(mangle)`        : '';
         const finesseNote = bladeFinesseBonus ? ` +${bladeFinesseBonus}(finesse)`  : '';
         const markNote    = spiritMarkBonus   ? ` +${spiritMarkBonus}(mark)`       : '';
-        addLog(`${hero.name}: [${rawDice.join('][')}]${acidNote}${extraNote}+${dmgAttr}${dmgAttrName}+${cmods.damageBonus}bonus${mercilessNote}${mangleNote}${finesseNote}${markNote} = ${rawScore}${pierceNote} vs ${foeArmour}arm → ${dmgDealt}dmg to ${target?.name}`, 'log-hit');
+        // Show adjustedDice (post acid/sear/shades) so the numbers visually add up in the log.
+        // If there's a per-die bonus, also show the raw roll for reference.
+        const diceDisplay = dieBonusPerDie > 0
+          ? `[${rawDice.join('][')}]${acidNote}→[${adjustedDice.join('][')}]`
+          : `[${rawDice.join('][')}]`;
+        addLog(`${hero.name}: ${diceDisplay}${extraNote}+${dmgAttr}${dmgAttrName}+${cmods.damageBonus}bonus${mercilessNote}${mangleNote}${finesseNote}${markNote} = ${rawScore}${pierceNote} vs ${foeArmour}arm → ${dmgDealt}dmg to ${target?.name}`, 'log-hit');
 
         // Blood Thief (HoF mo): for each [6] on damage dice, restore 4 health
         if (cmods.bloodThiefActive && allDice.some(d=>d>=6)) {
@@ -7013,9 +7042,12 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       } else {
         // Foe rolls
         const foe = target;
-        const foeDmgAttr = foe?.usesMagic
-          ? Math.max(0,(parseInt(foe.magic)||0)-(foe.magicPenalty||0)-(foe.magicPenaltyThisRound||0))
-          : Math.max(0,(parseInt(foe.brawn)||0)-(foe.brawnPenalty||0)-(foe.brawnPenaltyThisRound||0));
+        // Rules: foe damage score = dice + highest of (brawn, magic) after penalties — same rule as hero.
+        // usesMagic toggle is removed from this calculation; the higher stat wins automatically.
+        const foeBrawnEff = Math.max(0,(parseInt(foe.brawn)||0)-(foe.brawnPenalty||0)-(foe.brawnPenaltyThisRound||0));
+        const foeMagicEff = Math.max(0,(parseInt(foe.magic)||0)-(foe.magicPenalty||0)-(foe.magicPenaltyThisRound||0));
+        const foeDmgAttr  = Math.max(foeBrawnEff, foeMagicEff);
+        const foeDmgAttrName = foeBrawnEff >= foeMagicEff ? 'brawn' : 'magic';
         // Reckless (Dune/EoWF/HoF sp): if hero played Reckless and foe wins, foe gets +1 damage die
         const recklessExtra = (cmods.recklessActive && winner === 'foe') ? 1 : 0;
         const foeDmgDiceCount = Math.max(1, 1 + (foeDamageDiceOverride[foe?.id] || 0) + recklessExtra);
@@ -7042,7 +7074,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         const diceStr = foeDiceAdj.length > 1
           ? `[${foeDiceAdj.join('][')}](${foeDiceSum})${ssNote}`
           : `[${foeDiceAdj[0]}]${ssNote}`;
-        addLog(`${foe?.name}: ${diceStr}${recklessNote}+${foeDmgAttr}${fearNote} = ${dmgScore} vs ${heroArm}arm → ${dmgDealt}dmg to ${hero.name}`, 'log-hit');
+        addLog(`${foe?.name}: ${diceStr}${recklessNote}+${foeDmgAttr}${foeDmgAttrName}${fearNote} = ${dmgScore} vs ${heroArm}arm → ${dmgDealt}dmg to ${hero.name}`, 'log-hit');
 
         // Brittle Edge (EoWF pa): foe takes 2 damage when they roll for damage score
         if (hasBrittleEdge) {
@@ -8191,20 +8223,6 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
                   </span>
                 ))}
               </div>
-              {/* Foe damage type toggle */}
-              <div style={{marginTop:6,display:'flex',alignItems:'center',gap:6}}>
-                <span style={{fontFamily:'Cinzel,serif',fontSize:8,letterSpacing:2,color:'var(--parchment-dark)',textTransform:'uppercase'}}>Dmg via:</span>
-                {[{val:false,label:'Brawn',col:'var(--gold)'},{val:true,label:'Magic',col:'#4a9eff'}].map(({val,label,col})=>(
-                  <button key={label} onClick={()=>updateFoe(foe.id,'usesMagic',val)} disabled={phase!=='setup'}
-                    style={{padding:'2px 6px',fontFamily:'Cinzel,serif',fontSize:8,letterSpacing:1,
-                      background:foe.usesMagic===val?'rgba(212,160,23,0.1)':'rgba(0,0,0,0.3)',
-                      border:`1px solid ${foe.usesMagic===val?col:'rgba(90,74,32,0.4)'}`,
-                      color:foe.usesMagic===val?col:'var(--parchment-dark)',
-                      cursor:'pointer',borderRadius:1}}>
-                    {label}
-                  </button>
-                ))}
-              </div>
             </div>
           );
         })}
@@ -8591,9 +8609,9 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
                               newDmgDice = damageDice.map((v,j)=>j===i?5:v);
                               logMsg = `High Five: die ${i+1} [${d}]→[5]`;
                             }
-                            const heroPath = hero.heroPath||hero.path;
-                            const isMage = heroPath==='mage';
-                            const dmgAttr = isMage?(computed.magic+cmods.magicBonus+(cmods.heroStatAdj?.magic||0)):(computed.brawn+cmods.brawnBonus+(cmods.heroStatAdj?.brawn||0));
+                            const dmRecBrawn = computed.brawn+cmods.brawnBonus+(cmods.heroStatAdj?.brawn||0);
+                            const dmRecMagic = computed.magic+cmods.magicBonus+(cmods.heroStatAdj?.magic||0);
+                            const dmgAttr = Math.max(dmRecBrawn, dmRecMagic);
                             const foeObj  = foes.find(f=>f.id===activeFoeId)||liveFoes()[0];
                             const foeArmour = calcFoeArmour(foeObj);
                             const diceSum = newDmgDice.reduce((a,b)=>a+b,0);
