@@ -4544,7 +4544,19 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     setActiveFoeId(initFoes[0].id);
     setRound(0);
     setHeroHp(computed.maxHealth); // Bug fix: use maxHealth (includes career bonus), not base health stat
-    setHeroPassives({ bleed:false, venom:false, disease:false, thorns:false, fire_aura:false, barbs:false, vitriol:false });
+    // Auto-enable unconditional area passives the hero actually has, so the player
+    // doesn't need to manually toggle them at the start of every combat.
+    const paNames = (heroAbils.passive || []).map(s => s.toLowerCase());
+    const hasPa = (n) => paNames.some(p => p === n || p.startsWith(n));
+    setHeroPassives({
+      bleed:    false,                   // DoT — toggled per-foe via heroDoTs, not here
+      venom:    false,                   // DoT — same
+      disease:  false,                   // DoT — same
+      thorns:   hasPa('thorns'),         // area passive — auto-on if hero has the ability
+      fire_aura:hasPa('fire aura'),      // area passive — auto-on
+      barbs:    hasPa('barbs'),          // area passive — auto-on
+      vitriol:  hasPa('vitriol'),        // area passive — auto-on
+    });
     setHeroDice([]); setDamageDice([]);
     setWinner(null); setDamageWinner(null); setRoundDamage(null);
     setPreRollDone(false); setPreDice([]); setPreTarget(initFoes[0].id);
@@ -7516,6 +7528,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       'vanquish','savagery','bright shield','iron will','might of stone','ice shield',
       'brain drain','tourniquet','cauterise','second wind','eureka','steal',
       'blood rage','meditation','dark pact',
+      'acid','sear', // activate once before rolling damage — persists for combat duration
       // Dune/EoWF new:
       'cunning','malice','mortal wound','resolve','frost burn','darksilver','frost guard',
       'fear','mind fumble','recall','torrent','sure edge','mind flay','boneshaker',
@@ -8646,17 +8659,29 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
                               newDmgDice = damageDice.map((v,j)=>j===i?5:v);
                               logMsg = `High Five: die ${i+1} [${d}]→[5]`;
                             }
-                            const dmRecBrawn = computed.brawn+cmods.brawnBonus+(cmods.heroStatAdj?.brawn||0);
-                            const dmRecMagic = computed.magic+cmods.magicBonus+(cmods.heroStatAdj?.magic||0);
-                            const dmgAttr = Math.max(dmRecBrawn, dmRecMagic);
                             const foeObj  = foes.find(f=>f.id===activeFoeId)||liveFoes()[0];
-                            const foeArmour = calcFoeArmour(foeObj);
                             const diceSum = newDmgDice.reduce((a,b)=>a+b,0);
-                            const hasMerc = hasAbil(allPassives,'merciless');
-                            const foeHasDoT = foeObj&&(foeObj.passives?.bleed||foeObj.passives?.venom||foeObj.passives?.disease||foeObj.heroDoTs?.bleed||foeObj.heroDoTs?.venom||foeObj.heroDoTs?.disease);
-                            const mercilessBonus = hasMerc&&foeHasDoT ? newDmgDice.length : 0;
-                            const rawScore = diceSum+dmgAttr+cmods.damageBonus+mercilessBonus;
-                            const newDmgDealt = Math.max(0, rawScore-foeArmour);
+                            let dmgAttr, rawScore, newDmgDealt;
+                            if (damageWinner === 'foe') {
+                              // Foe's damage dice — use foe's highest of (brawn, magic) with penalties
+                              const fBrawn = Math.max(0,(parseInt(foeObj?.brawn)||0)-(foeObj?.brawnPenalty||0)-(foeObj?.brawnPenaltyThisRound||0));
+                              const fMagic = Math.max(0,(parseInt(foeObj?.magic)||0)-(foeObj?.magicPenalty||0)-(foeObj?.magicPenaltyThisRound||0));
+                              dmgAttr = Math.max(fBrawn, fMagic);
+                              const foeDmgPenalty = cmods.foeDmgScorePenalty || 0;
+                              rawScore = Math.max(0, diceSum + dmgAttr - foeDmgPenalty);
+                              newDmgDealt = Math.max(0, rawScore - effectiveArmour);
+                            } else {
+                              // Hero's damage dice — use hero's highest of (brawn, magic)
+                              const dmRecBrawn = computed.brawn+cmods.brawnBonus+(cmods.heroStatAdj?.brawn||0);
+                              const dmRecMagic = computed.magic+cmods.magicBonus+(cmods.heroStatAdj?.magic||0);
+                              dmgAttr = Math.max(dmRecBrawn, dmRecMagic);
+                              const foeArmour = calcFoeArmour(foeObj);
+                              const hasMerc = hasAbil(allPassives,'merciless');
+                              const foeHasDoT = foeObj&&(foeObj.passives?.bleed||foeObj.passives?.venom||foeObj.passives?.disease||foeObj.heroDoTs?.bleed||foeObj.heroDoTs?.venom||foeObj.heroDoTs?.disease);
+                              const mercilessBonus = hasMerc&&foeHasDoT ? newDmgDice.length : 0;
+                              rawScore = diceSum+dmgAttr+cmods.damageBonus+mercilessBonus;
+                              newDmgDealt = Math.max(0, rawScore-foeArmour);
+                            }
                             setDamageDice(newDmgDice);
                             setRoundDamage(newDmgDealt);
                             addLog(`${logMsg} — new damage: ${newDmgDealt}`, 'log-roll');
