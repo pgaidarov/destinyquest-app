@@ -5028,8 +5028,8 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         foeDiceReduction: 0,
         foeSpeedPenaltyThisRound: 0,
         // foeBrawnPenaltyThisRound / foeMagicPenaltyThisRound removed — Zapped! now uses per-foe fields
-        piercingActive: false,
-        fatalBlowActive: false,
+        piercingActive: prev.piercingActive,   // preserved until after damage roll
+        fatalBlowActive: prev.fatalBlowActive, // preserved until after damage roll
         dodgeActive: false,
         windwalkerActive: false,
         criticalStrikeActive: false,
@@ -7127,6 +7127,8 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
           addLog(`⚡ Brittle Edge: foe rolled damage — 2 dmg to ${foe?.name} (ignores armour).`, 'log-hit');
         }
       }
+      // Clear pierce flags now that damage has been rolled and armour bypass consumed.
+      setCmods(p => ({ ...p, piercingActive: false, fatalBlowActive: false }));
       setRolling(false);
       setPhase('post-damage');
     }, 350);
