@@ -2154,9 +2154,21 @@ function computeStats(base, equipment) {
   return totals;
 }
 
+// ─── Safe UUID generator (BUG-002: crypto.randomUUID only works in secure contexts) ──
+const generateUUID = () => {
+  if (typeof crypto !== 'undefined' && crypto.randomUUID) {
+    try { return crypto.randomUUID(); } catch { /* fall through to polyfill */ }
+  }
+  // RFC 4122 v4 compliant fallback for HTTP / older browsers
+  return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
+    const r = Math.random() * 16 | 0;
+    return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
+  });
+};
+
 function createHero(name, cls, bookId) {
   return {
-    id: crypto.randomUUID(),
+    id: generateUUID(),
     name,
     path: cls,
     bookId: bookId || 'los',
@@ -2750,14 +2762,14 @@ const ABILITY_DB = [
 
 // ─── Blank item template ──────────────────────────────────────────────────────
 const blankItem = () => ({
-  id: crypto.randomUUID(),
+  id: generateUUID(),
   name: '',
   stats: { speed: 0, brawn: 0, magic: 0, armour: 0 },
   ability: { name: '', type: 'sp', description: '' },
 });
 
 const blankBackpackItem = () => ({
-  id: crypto.randomUUID(),
+  id: generateUUID(),
   name: '',
   effect: '',
   uses: 1,
@@ -2827,7 +2839,7 @@ function ItemTooltip({ item }) {
 // ─── Equipment Slot ───────────────────────────────────────────────────────────
 function EquipSlot({ slotKey, item, onClick }) {
   const [hovered, setHovered] = useState(false);
-  const meta = SLOT_META[slotKey];
+  const meta = SLOT_META[slotKey] || { label: slotKey || 'Unknown' };
   return (
     <div
       className={`eq-slot ${SLOT_POSITIONS[slotKey]} ${item ? 'equipped' : ''}`}
@@ -3766,7 +3778,7 @@ function CombatRoundTracker({ hero, showRoundTracker, setShowRoundTracker,
             const typeCol = TYPE_COLOR[ab.type] || 'var(--gold)';
             const abDesc  = (() => { const x=ABILITY_DB.find(a=>a.name.toLowerCase()===ab.name.toLowerCase()); return x?x.desc:''; })();
             return (
-              <div key={i} onClick={() => toggleRT(ab.name, ab.type, slotKey)}
+              <div key={`${ab.name}-${ab.type}-${slotKey}`} onClick={() => toggleRT(ab.name, ab.type, slotKey)}
                 title={abDesc}
                 style={{display:'flex',alignItems:'center',gap:7,padding:'6px 8px',borderRadius:1,
                   cursor:isPA?'default':'pointer',transition:'all 0.12s',
@@ -4114,9 +4126,23 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
   const [damageWinner, setDamageWinner] = useState(null);
   const [roundDamage, setRoundDamage]   = useState(null);
   const [rolling, setRolling]       = useState(false);
-  const [heroHp, setHeroHp] = useState(computed.maxHealth || hero.baseAttributes.maxHealth || hero.baseAttributes.health);
+  const [heroHp, setHeroHp] = useState(hero.baseAttributes?.maxHealth || hero.baseAttributes?.health || 30);
+  // BUG-001: sync heroHp once computed is available (computed is a plain var, but may reflect
+  // equipment bonuses not present in baseAttributes alone)
+  useEffect(() => {
+    if (computed?.maxHealth) setHeroHp(computed.maxHealth);
+  }, [computed?.maxHealth]);
   // Monotonic foe ID counter — never reused, avoids id collision after foe removal + rewind
   const nextFoeId = useRef(2); // starts at 2 since blankFoe(1) is the default
+  // BUG-005: reset foe counter when a different hero is loaded so IDs stay predictable
+  useEffect(() => {
+    nextFoeId.current = 2;
+    setFoes([blankFoe(1)]);
+    setActiveFoeId(1);
+    setPhase('setup');
+    setRound(0);
+    setLog([]);
+  }, [hero.id]);
 
   // Hero passive toggles — DoT and unconditional end-of-round passives only.
   // Acid and Sear are (mo) modifier abilities in LoS, tracked via usedOnce, not here.
@@ -4585,8 +4611,15 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
   // ── PRE-COMBAT ─────────────────────────────────────────────────────────────
   const rollPreCombat = () => {
     setRolling(true);
+    // BUG-007: capture preTarget by value now so the timeout uses the value at
+    // click-time, not a potentially stale closure reference later.
+    const capturedPreTarget = preTarget;
     setTimeout(() => {
-      const target = foes.find(f=>f.id===preTarget) || foes[0];
+      // Resolve target from current foes state (functional update pattern) to
+      // avoid acting on a stale foes snapshot if state changed during the delay.
+      const currentFoes = foes;
+      const target = currentFoes.find(f=>f.id===capturedPreTarget) || currentFoes[0];
+      if (!target) { setRolling(false); return; }
       const heroPath = hero.heroPath || hero.path;
       // Rules: damage = dice + highest of (brawn, magic) — same rule as main damage roll
       const preBrawn = computed.brawn + cmods.brawnBonus + (cmods.heroStatAdj?.brawn || 0);
@@ -7435,6 +7468,10 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     // Hooks must come first — before any conditional returns
     const [tapTip, setTapTip] = useState(null); // {name, typeLabel, desc}
     const tapTimerRef = useRef(null);
+    // BUG-004: cleanup touch timer on unmount to prevent state update on unmounted component
+    useEffect(() => {
+      return () => { if (tapTimerRef.current) clearTimeout(tapTimerRef.current); };
+    }, []);
 
     const speedAbs    = (heroAbils.speed    ||[]).filter(a=>a.trim());
     const combatAbs   = (heroAbils.combat   ||[]).filter(a=>a.trim());
@@ -7490,7 +7527,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       'magic tap','mangle','near death','penance','purge','redemption','refresh',
       'roll with it','silver frost','spirit ward','suppress','sure grip','underhand',
       'unstoppable','wisdom','wish master','agility',
-      'inner focus','savagery','malice','mortal wound',
+      'inner focus','savagery',
       // Extra missing HoF/all:
       'bless','consume','heartless','war paint','water jets','adrenaline'];
 
@@ -9018,7 +9055,7 @@ function migrateSave(h) {
   const out = { ...h };
 
   // Identifiers
-  if (!out.id)     out.id     = crypto.randomUUID();
+  if (!out.id)     out.id     = generateUUID();
   if (!out.bookId) out.bookId = 'los';
   if (!out.path && !out.heroPath) out.path = 'warrior';
 
@@ -9027,9 +9064,14 @@ function migrateSave(h) {
   if (!ba.maxHealth) ba.maxHealth = ba.health || 30;
   out.baseAttributes = ba;
 
-  // Equipment slots — null-fill any missing slot
+  // Equipment slots — null-fill any missing slot; strip any value that isn't a valid item object
   const EQ_SLOTS = ['head','chest','cloak','gloves','mainHand','leftHand','feet','talisman','necklace','ring1','ring2'];
-  out.equipment = { ...Object.fromEntries(EQ_SLOTS.map(s=>[s,null])), ...(out.equipment||{}) };
+  const validatedEquipment = EQ_SLOTS.reduce((acc, s) => {
+    const item = (out.equipment || {})[s];
+    acc[s] = (item && typeof item === 'object' && typeof item.name === 'string' && item.name) ? item : null;
+    return acc;
+  }, {});
+  out.equipment = validatedEquipment;
 
   // Backpack — always exactly 5 slots
   const bp = Array.isArray(out.backpack) ? out.backpack : [];
@@ -9080,7 +9122,13 @@ function readSlotsFromStorage() {
 }
 
 function writeSlotsToStorage(slots) {
-  try { localStorage.setItem(LS_KEY, JSON.stringify(slots)); } catch { /* storage full or unavailable */ }
+  try {
+    localStorage.setItem(LS_KEY, JSON.stringify(slots));
+    return true;
+  } catch (e) {
+    console.error('DQ save failed:', e);
+    return false; // BUG-008: caller can check return value and warn the user
+  }
 }
 
 function SaveManager({ currentHero, onLoad, onClose }) {
@@ -9096,7 +9144,8 @@ function SaveManager({ currentHero, onLoad, onClose }) {
     const h = { ...currentHero, lastModified: Date.now() };
     const updated = [...slots];
     updated[i] = h;
-    writeSlotsToStorage(updated);
+    const ok = writeSlotsToStorage(updated);
+    if (!ok) { alert('Save failed — storage may be full or unavailable (e.g. private browsing mode).'); return; }
     setSlots(updated);
     setConfirm(null);
   };
@@ -9112,7 +9161,8 @@ function SaveManager({ currentHero, onLoad, onClose }) {
   const deleteSlot = (i) => {
     const updated = [...slots];
     updated[i] = null;
-    writeSlotsToStorage(updated);
+    const ok = writeSlotsToStorage(updated);
+    if (!ok) { alert('Delete failed — storage may be unavailable.'); return; }
     setSlots(updated);
     setConfirm(null);
   };
@@ -9270,7 +9320,7 @@ function QuestsTab({ hero, setHero }) {
   const addCustomQuest = () => {
     const name = newQuestName.trim();
     if (!name) return;
-    const id = `custom_${crypto.randomUUID()}`;
+    const id = `custom_${generateUUID()}`;
     const updated = [...customQuests, { id, name, actNum: newQuestAct }];
     setHero(h => ({...h, customQuests: updated}));
     setNewQuestName('');
@@ -9456,7 +9506,11 @@ function App() {
 
   // Debounced notes — local state updates instantly, syncs to hero after 600ms idle
   const [localNotes, setLocalNotes] = useState("");
-  const notesDebounceRef = useRef(null);
+  const notesDebounceRef = useRef(undefined);
+  // BUG-003: cleanup timer on unmount to prevent state update on unmounted component
+  useEffect(() => {
+    return () => { if (notesDebounceRef.current) { clearTimeout(notesDebounceRef.current); notesDebounceRef.current = undefined; } };
+  }, []);
   // Keep localNotes in sync when hero changes externally (load/new)
   useEffect(() => { setLocalNotes(hero?.notes || ""); }, [hero?.id]);
   const handleNotesChange = (val) => {
@@ -9473,7 +9527,8 @@ function App() {
     if (!hero) return;
     const slots = readSlotsFromStorage();
     slots[0] = {...hero, lastModified: Date.now()};
-    writeSlotsToStorage(slots);
+    const ok = writeSlotsToStorage(slots);
+    if (!ok) { alert('Quick save failed — storage may be full or unavailable.'); return; }
     setQuickSaved(true);
     setTimeout(() => setQuickSaved(false), 1200);
   };
@@ -9732,8 +9787,8 @@ function App() {
                       <input className="health-input" type="number" placeholder="Δ" value={healthDelta}
                         onChange={e=>setHealthDelta(e.target.value)}
                         onKeyDown={e=>{if(e.key==="Enter"){const d=parseInt(healthDelta);if(!isNaN(d))applyHealth(d);}}} />
-                      <button className="btn-health btn-heal" onClick={()=>applyHealth(Math.abs(parseInt(healthDelta)||1))}>+ Heal</button>
-                      <button className="btn-health btn-damage" onClick={()=>applyHealth(-(Math.abs(parseInt(healthDelta)||1)))}>− Hit</button>
+                      <button className="btn-health btn-heal" onClick={()=>applyHealth(Math.abs(healthDelta===''?1:parseInt(healthDelta)||0))}>+ Heal</button>
+                      <button className="btn-health btn-damage" onClick={()=>applyHealth(-(Math.abs(healthDelta===''?1:parseInt(healthDelta)||0)))}>− Hit</button>
                     </div>
                     {/* Max health edit */}
                     <div style={{display:'flex',alignItems:'center',gap:8,marginTop:8}}>
