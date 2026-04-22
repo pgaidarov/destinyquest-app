@@ -4769,7 +4769,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
   const _recalcWinner = (newHeroDice, currentFoes) => {
     const carrySpeedPenalty = cmods.poundSpeedPenalty + cmods.surgeSpeedPenalty + cmods.impaleSpeedPenalty;
     const seeingRed = (computed.health > 0 && heroHp <= 20) && hasAbil(allPassives,'seeing red');
-    const heroSpd = Math.max(0, computed.speed + (seeingRed?2:0) + cmods.speedBonus - carrySpeedPenalty);
+    const heroSpd = Math.max(0, computed.speed + (seeingRed?2:0) + bloodFrenzyBonus + cmods.speedBonus + (cmods.heroStatAdj?.speed||0) - carrySpeedPenalty);
     const hTotal = newHeroDice.reduce((a,b)=>a+b,0) + heroSpd;
     let highestFoeTotal=0, leadFoe=null;
     // Include all active foe speed penalties: permanent, round-scoped, and next-round carry
@@ -5009,12 +5009,14 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
 
       // Reset per-round cmods
       setCmods(prev => {
-        // Decrement counters first, then decide what to keep
+        // Decrement counters first, then decide what to keep.
+        // The speed bonus was already read for THIS round's roll before this setCmods fires,
+        // so "keep if newCount > 0" correctly retains the bonus for exactly the stated rounds.
         const newAdrenalineRounds = Math.max(0, prev.adrenalineRoundsLeft - 1);
         const newTimeShiftRounds  = Math.max(0, prev.timeShiftRoundsLeft - 1);
-        // Adrenaline: keep +2 speed bonus only while rounds remain AFTER decrement
+        // Adrenaline: keep +2 speed bonus while rounds remain AFTER decrement
         const keepAdrenalineBonus = newAdrenalineRounds > 0;
-        // TimeShift: keep speed match only while rounds remain
+        // TimeShift: keep speed match while rounds remain
         const keepTimeShiftBonus  = newTimeShiftRounds > 0;
         const keepSpeedBonus = keepAdrenalineBonus || keepTimeShiftBonus;
         return ({
@@ -5357,7 +5359,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       setHeroHp(newHp);
       if (newHp <= 0 && hasKickStart && !cmods.kickStartUsed) {
         setHeroHp(15);
-        setFoes(fs => fs.map(f => f.id===activeFoeId ? {...f, heroDoTs:{venom:false,bleed:false,disease:false}} : f));
+        setFoes(fs => fs.map(f => ({...f, heroDoTs:{venom:false,bleed:false,disease:false}})));
         setHeroPassives(p => ({...p, bleed:false, venom:false, disease:false, thorns:false, fire_aura:false, barbs:false, vitriol:false}));
         setCmods(p=>({...p, damageBonus: p.damageBonus+4, kickStartUsed:true}));
         addLog(`${name}: -4 HP → KickStart triggered! Revived at 15 HP. +4 damage score. All passives removed.`, 'log-heal');
@@ -5613,7 +5615,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       const target = foes.find(f=>f.id===activeFoeId);
       if (target) {
         // Glossary: "1 extra damage for every 2 points of armour your opponent is wearing" — effective armour after penalties
-        const effectiveFoeArmour = Math.max(0, (parseInt(target.armour)||0) - (target.armourPenalty||0));
+        const effectiveFoeArmour = Math.max(0, (parseInt(target.armour)||0) - (target.armourPenalty||0) - (target.armourPenaltyThisRound||0));
         const shockDmg = Math.ceil(effectiveFoeArmour / 2);
         setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-shockDmg)}:f));
         addLog(`${name}: ${shockDmg} extra dmg (effective armour ${effectiveFoeArmour} ÷ 2, rounds up)`, 'log-hit');
@@ -5690,11 +5692,11 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         setFoes(updatedFoes);
         addLog(`${name} (speed): foe speed dice re-rolled!`, 'log-roll');
         const carrySpeedPenalty = cmods.poundSpeedPenalty + cmods.surgeSpeedPenalty + cmods.impaleSpeedPenalty;
-        const heroSpd = Math.max(0, computed.speed + (seeingRedActive?2:0) + cmods.speedBonus - carrySpeedPenalty);
+        const heroSpd = Math.max(0, computed.speed + (seeingRedActive?2:0) + bloodFrenzyBonus + cmods.speedBonus + (cmods.heroStatAdj?.speed||0) - carrySpeedPenalty);
         const hTotal = heroDice.reduce((a,b)=>a+b,0) + heroSpd;
         let highestFoeTotal=0, leadFoe=null;
         updatedFoes.filter(f=>f.hp>0).forEach(f=>{
-          const fSpd=Math.max(0,(parseInt(f.speed)||0)-(f.speedPenalty||0)-cmods.foeSpeedPenaltyThisRound);
+          const fSpd=Math.max(0,(parseInt(f.speed)||0)-(f.speedPenalty||0)-(f.speedPenaltyThisRound||0)-cmods.foeSpeedPenaltyThisRound);
           const fTotal=f.dice.reduce((a,b)=>a+b,0)+fSpd;
           addLog(`${f.name} re-rolled: [${f.dice.join('][')}]+${fSpd}=${fTotal}`, 'log-roll');
           if(fTotal>highestFoeTotal){highestFoeTotal=fTotal;leadFoe=f;}
@@ -5895,10 +5897,10 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       // LoS Steal: raise one of your stats to match foe's for this round — player chooses which
       const foeObj = foes.find(f=>f.id===activeFoeId);
       if (foeObj) {
-        const fSpd   = Math.max(0, (parseInt(foeObj.speed)||0)  - (foeObj.speedPenalty||0));
-        const fBrawn = Math.max(0, (parseInt(foeObj.brawn)||0)  - (foeObj.brawnPenalty||0));
-        const fMagic = Math.max(0, (parseInt(foeObj.magic)||0)  - (foeObj.magicPenalty||0));
-        const fArmour= Math.max(0, (parseInt(foeObj.armour)||0) - (foeObj.armourPenalty||0));
+        const fSpd   = Math.max(0, (parseInt(foeObj.speed)||0)  - (foeObj.speedPenalty||0)  - (foeObj.speedPenaltyThisRound||0));
+        const fBrawn = Math.max(0, (parseInt(foeObj.brawn)||0)  - (foeObj.brawnPenalty||0)  - (foeObj.brawnPenaltyThisRound||0));
+        const fMagic = Math.max(0, (parseInt(foeObj.magic)||0)  - (foeObj.magicPenalty||0)  - (foeObj.magicPenaltyThisRound||0));
+        const fArmour= Math.max(0, (parseInt(foeObj.armour)||0) - (foeObj.armourPenalty||0) - (foeObj.armourPenaltyThisRound||0));
         setPendingChoiceAction({
           abilityName: name,
           options: [
@@ -6024,11 +6026,11 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       setFoes(updatedFoes);
       addLog(`${name}: all foe speed dice re-rolled!`, 'log-roll');
       const carrySpeedPenalty = cmods.poundSpeedPenalty + cmods.surgeSpeedPenalty + cmods.impaleSpeedPenalty;
-      const heroSpd = Math.max(0, computed.speed + (seeingRedActive?2:0) + cmods.speedBonus - carrySpeedPenalty);
+      const heroSpd = Math.max(0, computed.speed + (seeingRedActive?2:0) + bloodFrenzyBonus + cmods.speedBonus + (cmods.heroStatAdj?.speed||0) - carrySpeedPenalty);
       const hTotal = heroDice.reduce((a,b)=>a+b,0) + heroSpd;
       let highestFoeTotal=0, leadFoe=null;
       updatedFoes.filter(f=>f.hp>0).forEach(f=>{
-        const fSpd=Math.max(0,(parseInt(f.speed)||0)-(f.speedPenalty||0)-cmods.foeSpeedPenaltyThisRound);
+        const fSpd=Math.max(0,(parseInt(f.speed)||0)-(f.speedPenalty||0)-(f.speedPenaltyThisRound||0)-cmods.foeSpeedPenaltyThisRound);
         const fTotal=f.dice.reduce((a,b)=>a+b,0)+fSpd;
         addLog(`${f.name} re-rolled: [${f.dice.join('][')}]+${fSpd}=${fTotal}`, 'log-roll');
         if(fTotal>highestFoeTotal){highestFoeTotal=fTotal;leadFoe=f;}
@@ -6398,7 +6400,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       const magic=computed.magic+cmods.magicBonus;
       if(magic<2){addLog(`${name}: requires 2 magic.`,'log-passive');setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;});return;}
       const target=foes.find(f=>f.id===activeFoeId);
-      const foeArm=Math.max(0,(parseInt(target?.armour)||0)-(target?.armourPenalty||0));
+      const foeArm=Math.max(0,(parseInt(target?.armour)||0)-(target?.armourPenalty||0)-(target?.armourPenaltyThisRound||0));
       const d1=rollD6(),d2=rollD6(); const dmg=d1+d2+foeArm+(2*dieBonusNoScore);
       setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,hp:Math.max(0,f.hp-dmg)}:f));
       setCmods(p=>({...p,magicBonus:p.magicBonus-2}));
@@ -6545,6 +6547,9 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
     // ── HoF Speed abilities ────────────────────────────────────────────────────
     } else if (key.includes('crawlers')) {
       // HoF (sp): foe -1 speed for TWO rounds (not one like shackle)
+      // sp ability fires before rollInitiative reads foe speed. Tick fires at start of
+      // each rollInitiative before speed is computed, so crippleRoundsLeft:2 gives exactly
+      // 2 active penalised rounds: N (2→1) and N+1 (1→sentinel), removed at N+2. ✅
       setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,crippleRoundsLeft:2,speedPenalty:(f.speedPenalty||0)+1}:f));
       addLog(`${name}: ${activeFoe?.name} -1 speed for 2 rounds.`,'log-roll');
     } else if (key.includes('wish master')) {
@@ -7264,8 +7269,8 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       if (newHeroHp <= 0 && hasKickStart && !cmods.kickStartUsed) {
         newHeroHp = 15;
         // Glossary: "This also removes all passive effects on your hero."
-        // Clear per-foe hero-inflicted DoTs AND the hero's own passive flags.
-        setFoes(fs => fs.map(f => f.id===activeFoeId ? {...f, heroDoTs:{venom:false,bleed:false,disease:false}} : f));
+        // Clear per-foe hero-inflicted DoTs on ALL foes (not just active) AND hero's passive flags.
+        setFoes(fs => fs.map(f => ({...f, heroDoTs:{venom:false,bleed:false,disease:false}})));
         setHeroPassives(p => ({...p, bleed:false, venom:false, disease:false, thorns:false, fire_aura:false, barbs:false, vitriol:false}));
         setCmods(p=>({...p,kickStartUsed:true}));
         addLog(`⚡ Kick Start: brought back to life at 15 HP! All passive effects removed.`, 'log-heal');
