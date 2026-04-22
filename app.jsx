@@ -4369,7 +4369,8 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
   // They live in allModifier (or allPassives for later books that reclassify them).
   // Check both lists so later-book overrides (pa in HoF/EoWF) still work correctly.
   const hasAcid          = hasAbil(allModifier,'acid') || hasAbil(allPassives,'acid');
-  const hasSear          = hasAbil(allModifier,'sear') || hasAbil(allPassives,'sear');
+  // Use exact-word check for 'sear' to avoid false positive with 'searing mantle'
+  const hasSear          = hasAbil(allModifier,'sear') || allPassives.some(a => a === 'sear');
   const hasVenom         = hasAbil(allPassives,'venom');
   const hasBleed         = hasAbil(allPassives,'bleed');
   const hasDisease       = hasAbil(allPassives,'disease');
@@ -5022,7 +5023,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         return ({
         ...prev,
         extraSpeedDice: 0, // always reset per-round — Adrenaline gives +2 speed (stat), not extra dice
-        speedBonus: keepSpeedBonus ? prev.speedBonus : (prev.reboundActive ? 2 : 0),
+        speedBonus: (keepSpeedBonus ? prev.speedBonus : (prev.reboundActive ? 2 : 0)) + (prev.hookedDieSaved||0),
         reboundActive: false,
         armourBonus: 0,
         magicBonus: 0,
@@ -5067,7 +5068,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         soulBurstUsed: prev.soulBurstUsed,         // persistent
         heroStatAdj: prev.heroStatAdj,             // persistent — only reset at combat start
         heroStatAdjRound: { brawn:0, magic:0, speed:0, armour:0 }, // per-round — cleared every initiative
-        hookedDieSaved: 0,                         // consumed: die was added to speedBonus already
+        hookedDieSaved: 0,                         // cleared after being carried into speedBonus above
         // rainingBlowsActive intentionally NOT reset — persists for full combat once activated
         poundSpeedPenalty: 0,
         surgeSpeedPenalty: 0,
@@ -5474,7 +5475,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
         }
         setCmods(p=>({...p, dodgeActive:true}));
         setPhase('post-damage');
-      } else addLog(`${name}: only usable when foe wins the round.`, 'log-passive');
+      } else { addLog(`${name}: only usable when foe wins the round.`, 'log-passive'); setUsedOnce(prev=>{const s=new Set(prev);s.delete(key);return s;}); }
     } else if (key.includes('bolt')) {
       if (!cmods.boltReleaseActive) {
         // Check if it was already released this combat (usedOnce has 'bolt_released')
@@ -5897,7 +5898,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       // LoS Steal: raise one of your stats to match foe's for this round — player chooses which
       const foeObj = foes.find(f=>f.id===activeFoeId);
       if (foeObj) {
-        const fSpd   = Math.max(0, (parseInt(foeObj.speed)||0)  - (foeObj.speedPenalty||0)  - (foeObj.speedPenaltyThisRound||0));
+        const fSpd   = Math.max(0, (parseInt(foeObj.speed)||0)  - (foeObj.speedPenalty||0)  - (foeObj.speedPenaltyThisRound||0) - cmods.foeSpeedPenaltyThisRound);
         const fBrawn = Math.max(0, (parseInt(foeObj.brawn)||0)  - (foeObj.brawnPenalty||0)  - (foeObj.brawnPenaltyThisRound||0));
         const fMagic = Math.max(0, (parseInt(foeObj.magic)||0)  - (foeObj.magicPenalty||0)  - (foeObj.magicPenaltyThisRound||0));
         const fArmour= Math.max(0, (parseInt(foeObj.armour)||0) - (foeObj.armourPenalty||0) - (foeObj.armourPenaltyThisRound||0));
@@ -6205,15 +6206,14 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       });
     } else if (key.includes('misdirection') && !key.includes('improved')) {
       // Dune Sea (wa): dodge + speed +1 next round, costs 4 HP
+      // reboundActive gives +2 speed; Misdirection should give +1. Using speedBonus+1 carry
+      // via hookedDieSaved-style mechanism isn't available, so we apply +1 directly to
+      // speedBonus and also set reboundActive:false to avoid double-counting.
       const newHp = Math.max(0, heroHp-4);
       setHeroHp(newHp);
-      setCmods(p=>({...p, dodgeActive:true, reboundActive:true})); // reboundActive gives +2; adjust to +1 below
-      // reboundActive gives +2 speed; we need +1. Use a special carry.
-      // Simplest: use speedBonus+1 carry into next round via slamSpeedPenalty cancellation.
-      // Actually let's just give +2 via reboundActive — close enough, player can adjust.
-      // Better: treat as +1 via a round-carry. Use reclaimActive repurposed? No. Use speedBonus carry.
-      setCmods(p=>({...p, dodgeActive:true, speedBonus: p.speedBonus})); // dodge only
-      addLog(`${name}: -4 HP. Damage avoided. +1 speed next round (apply manually or note).`, 'log-passive');
+      if(newHp<=0){endCombat('foe');return;}
+      setCmods(p=>({...p, dodgeActive:true, hookedDieSaved:(p.hookedDieSaved||0)+1}));
+      addLog(`${name}: -4 HP. Damage avoided. +1 speed next round.`, 'log-passive');
       setPhase('post-damage');
     } else if (key.includes('improved misdirection')) {
       // Dune Sea (wa): dodge + speed +2 next round, costs 4 HP
@@ -6572,10 +6572,18 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
 
     // ── HoF Modifier abilities ─────────────────────────────────────────────────
     } else if (key.includes('atonement')) {
-      // HoF (mo): heal = total passive damage on active foe this round
+      // HoF (mo): heal = total passive damage inflicted on active foe this round.
+      // Must mirror applyPassives damage values exactly.
       const foeDoTs=foes.find(f=>f.id===activeFoeId)?.heroDoTs||{};
-      const heal=(foeDoTs.venom?2:0)+(foeDoTs.bleed?1:0)+(foeDoTs.disease?2:0)
-               +(heroPassives.thorns?1:0)+(heroPassives.barbs?1:0)+(heroPassives.fire_aura?1:0);
+      const bleedDmgAton = 1 + (hasGougePa || hasGougeActive ? 1 : 0) + (hasRapidPulse && heroHp <= 10 ? 1 : 0);
+      const heal=(foeDoTs.venom ? venomDmg : 0)
+               +(foeDoTs.bleed  ? bleedDmgAton : 0)
+               +(foeDoTs.disease ? 2 : 0)
+               +(heroPassives.thorns||heroPassives.barbs ? 1 : 0)
+               +(heroPassives.fire_aura ? (1+(hasTurnUpHeat?1:0)) : 0)
+               +(heroPassives.vitriol ? 1 : 0)
+               +(hasDecay ? 1 : 0)
+               +(hasSparkJolt ? 1 : 0);
       if(heal>0){
         const newHp=Math.min(computed.maxHealth,heroHp+heal);
         setHeroHp(newHp);onHeroHealthChange(newHp);
@@ -6646,7 +6654,9 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
       addLog(`${name}: active — any [6] on foe damage dice can be rerolled.`,'log-passive');
     } else if (key.includes('insight')) {
       // HoF (mo): foe armour -2 for TWO rounds (not permanent)
-      setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,armourPenalty:(f.armourPenalty||0)+2,armourPenaltyRoundsLeft:2}:f));
+      // armourPenaltyRoundsLeft ticks down at start of each rollInitiative (post-ability activation).
+      // Penalty is removed when count reaches 0, so starting at 3 gives 2 active penalised rounds.
+      setFoes(fs=>fs.map(f=>f.id===activeFoeId?{...f,armourPenalty:(f.armourPenalty||0)+2,armourPenaltyRoundsLeft:3}:f));
       addLog(`${name}: ${activeFoe?.name} armour -2 for 2 rounds.`,'log-roll');
     } else if (key.includes('last defence') || key.includes('last defense')) {
       // HoF (mo): if HP ≤ 10, brawn +2
@@ -7969,7 +7979,7 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
                   cls += ' interactive';
                   clickHandler = () => {
                     // Save this die result — it will be added to next round's speed bonus
-                    setCmods(p=>({...p, speedBonus: p.speedBonus + d, hookedDieSaved: d}));
+                    setCmods(p=>({...p, hookedDieSaved: d}));
                     addLog(`Hooked: saved [${d}] — will add to speed next round.`, 'log-roll');
                     setPendingDiceAction(null);
                     // Remove the saved die from this round's dice (can't use it twice)
@@ -8125,8 +8135,8 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
           const foeHpPct=Math.max(0,Math.min(100,(foe.hp/(parseInt(foe.maxHealth)||1))*100));
           const isActive=foe.id===activeFoeId;
           const isDead=foe.hp<=0;
-          const effArmour=Math.max(0,(parseInt(foe.armour)||0)-(foe.armourPenalty||0));
-          const effSpeed=Math.max(0,(parseInt(foe.speed)||0)-(foe.speedPenalty||0));
+          const effArmour=Math.max(0,(parseInt(foe.armour)||0)-(foe.armourPenalty||0)-(foe.armourPenaltyThisRound||0));
+          const effSpeed=Math.max(0,(parseInt(foe.speed)||0)-(foe.speedPenalty||0)-(foe.speedPenaltyThisRound||0)-cmods.foeSpeedPenaltyThisRound);
           return (
             <div key={foe.id} className="combatant-card foe-card"
               style={{opacity:isDead?.45:1,
@@ -8686,7 +8696,11 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
                               const hasMerc = hasAbil(allPassives,'merciless');
                               const foeHasDoT = foeObj&&(foeObj.passives?.bleed||foeObj.passives?.venom||foeObj.passives?.disease||foeObj.heroDoTs?.bleed||foeObj.heroDoTs?.venom||foeObj.heroDoTs?.disease);
                               const mercilessBonus = hasMerc&&foeHasDoT ? newDmgDice.length : 0;
-                              rawScore = diceSum+dmgAttr+cmods.damageBonus+mercilessBonus;
+                              const mangleBonus2 = (hasMangle || cmods.mangleHoFActive) ? newDmgDice.filter(d=>d>=6).length * 2 : 0;
+                              const hasSwordMH2 = (hero.equipment?.mainHand?.name||'').toLowerCase().includes('sword');
+                              const bladeFinesseBonus2 = (hasBladefinesse && hasSwordMH2) ? newDmgDice.filter(d=>d>=6).length : 0;
+                              const spiritMarkBonus2 = foeObj?.spiritMarked ? 2 : 0;
+                              rawScore = diceSum+dmgAttr+cmods.damageBonus+mercilessBonus+mangleBonus2+bladeFinesseBonus2+spiritMarkBonus2;
                               newDmgDealt = Math.max(0, rawScore-foeArmour);
                             }
                             setDamageDice(newDmgDice);
