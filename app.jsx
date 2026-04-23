@@ -8137,6 +8137,8 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
           const isDead=foe.hp<=0;
           const effArmour=Math.max(0,(parseInt(foe.armour)||0)-(foe.armourPenalty||0)-(foe.armourPenaltyThisRound||0));
           const effSpeed=Math.max(0,(parseInt(foe.speed)||0)-(foe.speedPenalty||0)-(foe.speedPenaltyThisRound||0)-cmods.foeSpeedPenaltyThisRound);
+          const effBrawn=Math.max(0,(parseInt(foe.brawn)||0)-(foe.brawnPenalty||0)-(foe.brawnPenaltyThisRound||0));
+          const effMagic=Math.max(0,(parseInt(foe.magic)||0)-(foe.magicPenalty||0)-(foe.magicPenaltyThisRound||0));
           return (
             <div key={foe.id} className="combatant-card foe-card"
               style={{opacity:isDead?.45:1,
@@ -8170,11 +8172,11 @@ function CombatSimulator({ hero, setHero, onHeroHealthChange }) {
               <div className="combat-stat-row">
                 {['speed','brawn','magic','armour'].map(s=>(
                   <div key={s} className="combat-stat-input">
-                    <label>{s}{phase!=='setup'&&(s==='speed'&&foe.speedPenalty>0?` -${foe.speedPenalty}`:s==='armour'&&foe.armourPenalty>0?` -${foe.armourPenalty}`:'')}</label>
-                    <input type="number" min={0} value={phase==='setup'?foe[s]||0:(s==='speed'?effSpeed:s==='armour'?effArmour:foe[s]||0)}
+                    <label>{s}{phase!=='setup'&&(s==='speed'&&foe.speedPenalty>0?` -${foe.speedPenalty}`:s==='armour'&&foe.armourPenalty>0?` -${foe.armourPenalty}`:s==='brawn'&&foe.brawnPenalty!==0?(foe.brawnPenalty>0?` -${foe.brawnPenalty}`:` +${Math.abs(foe.brawnPenalty)}`):s==='magic'&&foe.magicPenalty!==0?(foe.magicPenalty>0?` -${foe.magicPenalty}`:` +${Math.abs(foe.magicPenalty)}`):'')}</label>
+                    <input type="number" min={0} value={phase==='setup'?foe[s]||0:(s==='speed'?effSpeed:s==='armour'?effArmour:s==='brawn'?effBrawn:s==='magic'?effMagic:foe[s]||0)}
                       onChange={e=>updateFoe(foe.id,s,e.target.value)}
                       disabled={phase!=='setup'}
-                      style={{borderColor:phase!=='setup'&&((s==='speed'&&foe.speedPenalty>0)||(s==='armour'&&foe.armourPenalty>0))?'rgba(192,57,43,0.5)':undefined}}/>
+                      style={{borderColor:phase!=='setup'&&((s==='speed'&&foe.speedPenalty>0)||(s==='armour'&&foe.armourPenalty>0)||(s==='brawn'&&foe.brawnPenalty!==0)||(s==='magic'&&foe.magicPenalty!==0))?'rgba(192,57,43,0.5)':undefined}}/>
                   </div>
                 ))}
               </div>
